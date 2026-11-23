@@ -1,23 +1,27 @@
 (() => {
   function createEditor(video) {
+    const listeners = new Set();
+    const sampleSource = video.getAttribute('src');
+    let source = sampleSource;
     let clips = [];
     let currentTime = 0;
     let selectedClipId = null;
     let nextId = 1;
-    const listeners = new Set();
+    let playing = false;
+    let pendingTime = null;
+    let error = '';
 
-    function duration() {
-      return clips.reduce((total, clip) => total + clip.end - clip.start, 0);
-    }
+    const length = clip => clip.end - clip.start;
+    const duration = () => clips.reduce((total, clip) => total + length(clip), 0);
+    const startOf = index => clips.slice(0, index).reduce((total, clip) => total + length(clip), 0);
 
     function clipAt(seconds) {
       let projectStart = 0;
       for (const [index, clip] of clips.entries()) {
-        const length = clip.end - clip.start;
-        if (seconds < projectStart + length || index === clips.length - 1) {
-          return { clip, index, offset: seconds - projectStart };
+        if (seconds < projectStart + length(clip) || index === clips.length - 1) {
+          return { clip, index, offset: seconds - projectStart, projectStart };
         }
-        projectStart += length;
+        projectStart += length(clip);
       }
       return null;
     }
@@ -29,9 +33,10 @@
         currentTime,
         duration: duration(),
         selectedClipId,
-        playing: !video.paused && !video.ended,
+        playing,
+        error,
         canSplit: Boolean(position && position.clip.id === selectedClipId &&
-          position.offset > 0.01 && position.clip.end - position.clip.start - position.offset > 0.01)
+          position.offset > 0.01 && length(position.clip) - position.offset > 0.01)
       };
     }
 
@@ -46,54 +51,198 @@
       return () => listeners.delete(listener);
     }
 
-    function seek(seconds) {
-      if (!Number.isFinite(seconds) || !clips.length) return;
-      currentTime = Math.max(0, Math.min(seconds, duration()));
-      const { clip, offset } = clipAt(currentTime);
-      selectedClipId = clip.id;
-      video.currentTime = clip.start + offset;
+    function fail(message) {
+      playing = false;
+      video.pause();
+      error = message;
       publish();
     }
 
-    function selectClip(clipId) {
-      if (!clips.some(clip => clip.id === clipId)) return;
-      selectedClipId = clipId;
+    function resume() {
+      if (!playing || pendingTime !== null || video.seeking) return;
+      const requestedSource = source;
+      video.play().catch(reason => {
+        if (playing && source === requestedSource && reason.name !== 'AbortError') {
+          fail('无法播放此视频。');
+        }
+      });
+    }
+
+    function applyPendingTime() {
+      if (pendingTime === null || video.readyState < 1) return;
+      const target = pendingTime;
+      pendingTime = null;
+      if (Math.abs(video.currentTime - target) > 0.0001) video.currentTime = target;
+      resume();
+    }
+
+    function showPosition() {
+      const position = clipAt(currentTime);
+      if (!position) {
+        playing = false;
+        pendingTime = null;
+        source = null;
+        video.removeAttribute('src');
+        video.load();
+        publish();
+        return;
+      }
+
+      pendingTime = position.clip.start + position.offset;
+      if (source !== position.clip.src) {
+        source = position.clip.src;
+        video.src = source;
+      } else {
+        applyPendingTime();
+      }
       publish();
+    }
+
+    function seek(seconds) {
+      if (!Number.isFinite(seconds) || !clips.length) return;
+      error = '';
+      currentTime = Math.max(0, Math.min(seconds, duration()));
+      selectedClipId = clipAt(currentTime).clip.id;
+      showPosition();
+    }
+
+    function selectClip(clipId) {
+      const index = clips.findIndex(clip => clip.id === clipId);
+      if (index < 0) return;
+      if (clipAt(currentTime).clip.id === clipId) {
+        selectedClipId = clipId;
+        publish();
+      } else {
+        seek(startOf(index));
+      }
     }
 
     function splitAtPlayhead() {
       if (!snapshot().canSplit) return false;
       const { clip, index, offset } = clipAt(currentTime);
       const cut = clip.start + offset;
-      const right = { id: nextId++, start: cut, end: clip.end };
+      const right = { ...clip, id: nextId++, start: cut };
       clips.splice(index, 1, { ...clip, end: cut }, right);
       selectedClipId = right.id;
       publish();
       return true;
     }
 
-    function loadSample() {
-      if (!Number.isFinite(video.duration) || video.duration <= 0) return;
-      const sample = { id: nextId++, start: 0, end: video.duration };
-      clips = [sample];
-      currentTime = video.currentTime;
-      selectedClipId = sample.id;
+    function deleteClip(clipId) {
+      const index = clips.findIndex(clip => clip.id === clipId);
+      if (index < 0) return;
+      const position = clipAt(currentTime);
+      const nextTime = position.index === index
+        ? startOf(index)
+        : currentTime - (position.index > index ? length(clips[index]) : 0);
+      const [removed] = clips.splice(index, 1);
+      if (clips.length) {
+        seek(nextTime);
+      } else {
+        currentTime = 0;
+        selectedClipId = null;
+        showPosition();
+      }
+      if (removed.src.startsWith('blob:') && !clips.some(clip => clip.src === removed.src)) {
+        URL.revokeObjectURL(removed.src);
+      }
+    }
+
+    function moveClip(clipId, toIndex) {
+      const fromIndex = clips.findIndex(clip => clip.id === clipId);
+      if (fromIndex < 0 || !Number.isInteger(toIndex) || toIndex < 0 ||
+          toIndex >= clips.length || fromIndex === toIndex) return;
+      const position = clipAt(currentTime);
+      const [clip] = clips.splice(fromIndex, 1);
+      clips.splice(toIndex, 0, clip);
+      seek(startOf(clips.indexOf(position.clip)) + position.offset);
+    }
+
+    async function insertVideo(file) {
+      const src = URL.createObjectURL(file);
+      const probe = document.createElement('video');
+      probe.preload = 'metadata';
+      let end;
+      try {
+        end = await new Promise((resolve, reject) => {
+          probe.onloadedmetadata = () => resolve(probe.duration);
+          probe.onerror = () => reject(new Error('无法读取此视频，请尝试浏览器支持的格式。'));
+          probe.src = src;
+        });
+        if (!Number.isFinite(end) || end <= 0) throw new Error('无法读取视频时长。');
+      } catch (reason) {
+        URL.revokeObjectURL(src);
+        throw reason;
+      } finally {
+        probe.removeAttribute('src');
+        probe.load();
+      }
+      const position = clipAt(currentTime);
+      const index = position ? position.index + 1 : 0;
+      clips.splice(index, 0, { id: nextId++, src, start: 0, end, name: file.name });
+      seek(startOf(index));
+    }
+
+    function togglePlayback() {
+      if (!clips.length) return;
+      playing = !playing;
+      if (!playing) {
+        video.pause();
+      } else if (currentTime >= duration()) {
+        seek(0);
+      } else {
+        resume();
+      }
       publish();
     }
 
-    // 第一轮只有同一条素材的连续片段，播放器时间与项目时间一致。
-    video.addEventListener('timeupdate', () => {
-      if (video.seeking || !clips.length) return;
-      currentTime = Math.min(video.currentTime, duration());
+    function updatePlayback() {
+      if (!playing || pendingTime !== null || video.seeking || video.readyState < 2) return;
+      const position = clipAt(currentTime);
+      if (!position) return;
+      if (video.currentTime >= position.clip.end || video.ended) {
+        if (position.index === clips.length - 1) {
+          playing = false;
+          video.pause();
+          seek(duration());
+        } else {
+          seek(position.projectStart + length(position.clip));
+        }
+        return;
+      }
+      currentTime = position.projectStart + Math.max(0, video.currentTime - position.clip.start);
       publish();
+    }
+
+    let samplePending = true;
+    function loadMetadata() {
+      if (samplePending && source === sampleSource) {
+        samplePending = false;
+        if (Number.isFinite(video.duration) && video.duration > 0) {
+          clips.unshift({ id: nextId++, src: source, start: 0, end: video.duration, name: '示例视频' });
+          seek(0);
+        }
+      }
+      applyPendingTime();
+    }
+
+    video.addEventListener('loadedmetadata', loadMetadata);
+    video.addEventListener('seeked', resume);
+    video.addEventListener('ended', updatePlayback);
+    video.addEventListener('timeupdate', updatePlayback);
+    video.addEventListener('error', () => {
+      if (source === sampleSource) samplePending = false;
+      if (source) fail('无法加载预览视频。');
     });
-    video.addEventListener('loadedmetadata', loadSample);
-    for (const event of ['play', 'pause', 'ended']) {
-      video.addEventListener(event, publish);
-    }
-    if (video.readyState >= 1) loadSample();
 
-    return { subscribe, seek, selectClip, splitAtPlayhead };
+    function tick() {
+      if (!video.paused) updatePlayback();
+      requestAnimationFrame(tick);
+    }
+    requestAnimationFrame(tick);
+    if (video.readyState >= 1) loadMetadata();
+
+    return { subscribe, seek, selectClip, splitAtPlayhead, deleteClip, moveClip, insertVideo, togglePlayback };
   }
 
   window.createEditor = createEditor;

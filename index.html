@@ -11,7 +11,7 @@
 <body>
   <main>
     <h1>视频剪辑 Demo</h1>
-    <video id="preview" src="assets/sample-browser.mp4" controls playsinline preload="metadata"
+    <video id="preview" src="assets/sample-browser.mp4" playsinline preload="metadata"
       aria-label="示例视频"></video>
     <section aria-label="剪辑时间轴">
       <div class="timeline-heading">
@@ -24,7 +24,14 @@
         <div id="playhead" class="playhead" aria-hidden="true"></div>
       </div>
     </section>
-    <button id="split" class="action" type="button" disabled>分割</button>
+    <div class="actions">
+      <button id="play" class="action" type="button" disabled>播放</button>
+      <button id="add" class="action" type="button">添加视频</button>
+      <button id="split" class="action" type="button" disabled>分割</button>
+      <button id="delete" class="action" type="button" disabled>删除</button>
+    </div>
+    <input id="file" type="file" accept="video/*" hidden>
+    <p id="status" role="status" hidden></p>
   </main>
 </body>
 </html>

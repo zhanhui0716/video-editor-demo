@@ -47,3 +47,8 @@ button { font: inherit; cursor: pointer; }
 }
 .action:disabled { opacity: .45; cursor: default; }
 
+.actions { display: grid; grid-template-columns: repeat(2, 1fr); gap: 10px; }
+.clips button { touch-action: none; user-select: none; -webkit-touch-callout: none; }
+.clips button.dragging { opacity: .55; }
+.clips button.drop-target { outline: 2px solid white; outline-offset: -3px; }
+video { aspect-ratio: 16 / 9; }
