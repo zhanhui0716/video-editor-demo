@@ -10,28 +10,51 @@
 </head>
 <body>
   <main>
-    <h1>视频剪辑 Demo</h1>
-    <video id="preview" src="assets/sample-browser.mp4" playsinline preload="metadata"
-      aria-label="示例视频"></video>
-    <section aria-label="剪辑时间轴">
+    <header class="page-header">
+      <span class="editor-mark" aria-hidden="true"></span>
+      <h1>视频剪辑 <span>Demo</span></h1>
+    </header>
+    <div class="preview">
+      <video id="preview" src="assets/sample-browser.mp4" playsinline preload="metadata"
+        aria-label="示例视频"></video>
+      <div class="preview-controls">
+        <button id="play" class="action" type="button" disabled>播放</button>
+        <button id="mute" class="action" type="button" disabled>关闭原声</button>
+      </div>
+    </div>
+    <section class="timeline-panel" aria-label="剪辑时间轴">
       <div class="timeline-heading">
         <label for="position">时间轴</label>
         <output id="time">0.00 秒</output>
       </div>
       <input id="position" type="range" min="0" max="0" step="any" value="0" disabled>
-      <div class="track">
-        <div id="clips" class="clips" aria-label="画面片段"></div>
-        <div id="playhead" class="playhead" aria-hidden="true"></div>
+      <div class="timeline-window">
+        <div id="timeline-scroll" class="timeline-scroll">
+          <div id="track" class="track">
+            <div id="ruler" class="ruler" aria-hidden="true"></div>
+            <div id="clips" class="clips" aria-label="画面片段"></div>
+          </div>
+        </div>
+        <div class="playhead" aria-hidden="true"></div>
+      </div>
+      <div class="timeline-tools">
+        <form id="jump">
+          <label for="seconds">跳到第几秒</label>
+          <input id="seconds" type="number" min="0" step="any" inputmode="decimal" required disabled>
+          <button type="submit" disabled>跳转</button>
+        </form>
+        <button id="zoom" type="button" aria-pressed="false" disabled>放大时间轴</button>
       </div>
     </section>
-    <div class="actions">
-      <button id="play" class="action" type="button" disabled>播放</button>
-      <button id="add" class="action" type="button">添加视频</button>
-      <button id="split" class="action" type="button" disabled>分割</button>
-      <button id="delete" class="action" type="button" disabled>删除</button>
-    </div>
-    <input id="file" type="file" accept="video/*" hidden>
     <p id="status" role="status" hidden></p>
+    <footer class="actions" aria-label="剪辑操作">
+      <button id="add" class="action" type="button"><span aria-hidden="true">+</span>添加视频</button>
+      <button id="split" class="action" type="button" disabled><span aria-hidden="true">✂</span>分割</button>
+      <button id="delete" class="action" type="button" disabled><span aria-hidden="true">×</span>删除</button>
+      <button id="undo" class="action" type="button" disabled><span aria-hidden="true">↶</span>撤销</button>
+      <button id="redo" class="action" type="button" disabled><span aria-hidden="true">↷</span>重做</button>
+    </footer>
+    <input id="file" type="file" accept="video/*" hidden>
   </main>
 </body>
 </html>

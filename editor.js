@@ -1,6 +1,9 @@
 (() => {
   function createEditor(video) {
     const listeners = new Set();
+    const undoStack = [];
+    const redoStack = [];
+    const importedSources = new Set();
     const sampleSource = video.getAttribute('src');
     let source = sampleSource;
     let clips = [];
@@ -34,6 +37,9 @@
         duration: duration(),
         selectedClipId,
         playing,
+        muted: video.muted,
+        canUndo: undoStack.length > 0,
+        canRedo: redoStack.length > 0,
         error,
         canSplit: Boolean(position && position.clip.id === selectedClipId &&
           position.offset > 0.01 && length(position.clip) - position.offset > 0.01)
@@ -117,9 +123,51 @@
       }
     }
 
+    function projectState() {
+      return { clips: [...clips], currentTime, selectedClipId };
+    }
+
+    function releaseUnusedSources() {
+      const retained = new Set(clips.map(clip => clip.src));
+      for (const state of [...undoStack, ...redoStack]) {
+        for (const clip of state.clips) retained.add(clip.src);
+      }
+      for (const src of importedSources) {
+        if (retained.has(src)) continue;
+        URL.revokeObjectURL(src);
+        importedSources.delete(src);
+      }
+    }
+
+    function rememberEdit() {
+      undoStack.push(projectState());
+      if (undoStack.length > 30) undoStack.shift();
+      redoStack.length = 0;
+      releaseUnusedSources();
+    }
+
+    function restore(from, to) {
+      if (!from.length) return;
+      to.push(projectState());
+      const state = from.pop();
+      playing = false;
+      video.pause();
+      clips = state.clips;
+      currentTime = state.currentTime;
+      selectedClipId = state.selectedClipId;
+      error = '';
+      showPosition();
+    }
+
+    function toggleMute() {
+      video.muted = !video.muted;
+      publish();
+    }
+
     function splitAtPlayhead() {
       if (!snapshot().canSplit) return false;
       const { clip, index, offset } = clipAt(currentTime);
+      rememberEdit();
       const cut = clip.start + offset;
       const right = { ...clip, id: nextId++, start: cut };
       clips.splice(index, 1, { ...clip, end: cut }, right);
@@ -135,7 +183,8 @@
       const nextTime = position.index === index
         ? startOf(index)
         : currentTime - (position.index > index ? length(clips[index]) : 0);
-      const [removed] = clips.splice(index, 1);
+      rememberEdit();
+      clips.splice(index, 1);
       if (clips.length) {
         seek(nextTime);
       } else {
@@ -143,9 +192,7 @@
         selectedClipId = null;
         showPosition();
       }
-      if (removed.src.startsWith('blob:') && !clips.some(clip => clip.src === removed.src)) {
-        URL.revokeObjectURL(removed.src);
-      }
+
     }
 
     function moveClip(clipId, toIndex) {
@@ -153,6 +200,7 @@
       if (fromIndex < 0 || !Number.isInteger(toIndex) || toIndex < 0 ||
           toIndex >= clips.length || fromIndex === toIndex) return;
       const position = clipAt(currentTime);
+      rememberEdit();
       const [clip] = clips.splice(fromIndex, 1);
       clips.splice(toIndex, 0, clip);
       seek(startOf(clips.indexOf(position.clip)) + position.offset);
@@ -179,6 +227,8 @@
       }
       const position = clipAt(currentTime);
       const index = position ? position.index + 1 : 0;
+      rememberEdit();
+      importedSources.add(src);
       clips.splice(index, 0, { id: nextId++, src, start: 0, end, name: file.name });
       seek(startOf(index));
     }
@@ -242,7 +292,12 @@
     requestAnimationFrame(tick);
     if (video.readyState >= 1) loadMetadata();
 
-    return { subscribe, seek, selectClip, splitAtPlayhead, deleteClip, moveClip, insertVideo, togglePlayback };
+    return {
+      subscribe, seek, selectClip, splitAtPlayhead, deleteClip, moveClip, insertVideo,
+      togglePlayback, toggleMute,
+      undo: () => restore(undoStack, redoStack),
+      redo: () => restore(redoStack, undoStack)
+    };
   }
 
   window.createEditor = createEditor;
