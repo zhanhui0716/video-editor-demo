@@ -1786,7 +1786,6 @@ button:active {
 #guide-next { color: white; background: #533982; }
 .guide-actions button:focus-visible, .guide-trigger:focus-visible { outline: 2px solid #a665e1; outline-offset: 2px; }
 
-.timeline.has-extra-tracks { min-height: 250px; }
 .timed-tracks { position: absolute; inset: 0; z-index: 4; pointer-events: none; }
 .timed-clip {
   position: absolute;
@@ -1918,3 +1917,13 @@ button:active {
   background: white;
 }
 #project-position::-moz-range-thumb { width: 12px; height: 12px; border: 0; border-radius: 50%; background: white; }
+
+.sheet-range { display: grid; grid-template-columns: auto minmax(0, 1fr) auto; align-items: center; gap: 8px; min-height: 34px; font-size: 13px; }
+.sheet-range input { width: 100%; accent-color: #e4d5ff; }
+.sheet-range output { min-width: 3em; text-align: right; }
+.timeline.has-extra-tracks { min-height: 270px; }
+.has-extra-tracks .audio-row, .has-extra-tracks .timed-clip { height: 25px; }
+.has-extra-tracks .timed-clip { top: calc(138px + var(--timed-lane, 0) * 26px); }
+.timed-pip { background: #265c6e; }
+.timed-effect { background: #6d407d; }
+.pip-wrap { right: auto; bottom: auto; transform: translate(-50%, -50%); touch-action: none; cursor: grab; }

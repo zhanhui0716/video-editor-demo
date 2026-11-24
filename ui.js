@@ -101,6 +101,7 @@
     selectedTimed: null,
     stickers: [],
     effect: 'original',
+    effectItem: null,
     sheet: null,
     modalBusy: false,
     exportTimer: null,
@@ -386,7 +387,6 @@
   /* ------------------------------------------------------------------ */
 
   function onState(next) {
-    const previous = state.data;
     state.data = next;
     const signature = clipListSignature(next.clips);
     const needsClips = signature !== state.clipSignature || state.layoutDirty;
@@ -402,7 +402,7 @@
     renderCover(next, needsClips);
     renderEmptyState(next);
     renderMute();
-    syncBackgroundMedia(next, previous);
+    syncBackgroundMedia(next);
   }
 
   function renderTime(next) {
@@ -521,10 +521,10 @@
     el.audioRow.hidden = !hasVideo || Boolean(state.audio?.track);
     el.audioRow.style.left = left + 'px';
     el.audioRow.style.width = Math.max(0, el.timeline.clientWidth - left) + 'px';
-    const overlays = [...state.texts, ...state.stickers];
+    const overlays = [...state.texts, ...state.stickers, state.pip, state.effectItem].filter(Boolean);
     el.timeline.classList.toggle('has-extra-tracks', overlays.length > 0);
     const items = [state.audio, ...overlays];
-    const activeLanes = ['audio', 'text', 'sticker'].filter(kind =>
+    const activeLanes = ['audio', 'text', 'sticker', 'pip', 'effect'].filter(kind =>
       kind === 'audio' || overlays.some(item => item.kind === kind));
     for (const item of items) {
       if (!item?.track) continue;
@@ -539,7 +539,9 @@
       item.node?.classList.toggle('is-overlay-selected', selected);
       item.track.querySelector('.timed-label').setAttribute('aria-pressed', String(selected));
       for (const handle of item.track.querySelectorAll('.timed-handle')) handle.hidden = !selected;
-      if (item.node) item.node.hidden = !visible || next.currentTime < item.start || next.currentTime >= end;
+      const active = visible && next.currentTime >= item.start && next.currentTime < end;
+      if (item.node) item.node.hidden = !active;
+      if (item.kind === 'effect') el.preview.style.filter = active ? item.filter : '';
     }
   }
 
@@ -561,7 +563,7 @@
 
       function trim(value) {
         const max = Math.min(state.data.duration, item.limit ?? Infinity);
-        const min = Math.max(0, item.anchor ?? 0);
+        const min = Math.max(0, item.minStart ?? item.anchor ?? 0);
         const minimumLength = Math.min(0.2, Math.max(0, max - min));
         if (edge === 'start') {
           item.start = clamp(value, min, Math.max(min, Math.min(item.end, max) - minimumLength));
@@ -569,7 +571,7 @@
           item.end = clamp(value, Math.min(max, item.start + minimumLength), max);
         }
         renderTimedTracks(state.data);
-        syncAudio(state.data);
+        syncBackgroundMedia(state.data);
       }
 
       handle.addEventListener('pointerdown', event => {
@@ -643,27 +645,28 @@
   /* 预览、音频、画中画同步                                             */
   /* ------------------------------------------------------------------ */
 
-  function syncBackgroundMedia(next, previous) {
+  function syncBackgroundMedia(next) {
     syncAudio(next);
-    if (!state.pip) return;
-    const pip = state.pip.el;
-    if (next.playing) {
-      if (pip.paused) pip.play().catch(() => {});
-    } else if (!pip.paused) {
-      pip.pause();
-    }
-    if (!next.playing && next.currentTime !== (previous && previous.currentTime)) {
-      const target = Number.isFinite(pip.duration) && pip.duration > 0
-        ? next.currentTime % pip.duration
-        : 0;
-      if (Math.abs(pip.currentTime - target) > 0.35) pip.currentTime = target;
+    const item = state.pip;
+    if (!item?.track || item.el.readyState < 1) return;
+    const video = item.el;
+    const active = next.currentTime >= item.start && next.currentTime < Math.min(next.duration, item.end);
+    const target = clamp(next.currentTime - item.anchor, 0, video.duration);
+    if (Math.abs(video.currentTime - target) > (next.playing ? 0.3 : 0.04)) video.currentTime = target;
+    if (active && next.playing) {
+      if (video.paused) video.play().catch(() => {});
+    } else if (!video.paused) {
+      video.pause();
     }
   }
-
   function syncAudio(next) {
     const item = state.audio;
     if (!item?.track || item.el.readyState < 1) return;
     const audio = item.el;
+    const elapsed = next.currentTime - item.start;
+    const remaining = Math.min(next.duration, item.end) - next.currentTime;
+    const fade = Math.min(item.fade || 0, (item.end - item.start) / 2);
+    audio.volume = item.volume * (fade ? clamp(Math.min(elapsed, remaining) / fade, 0, 1) : 1);
     const active = next.playing && next.currentTime >= item.start &&
       next.currentTime < Math.min(item.end, next.duration);
     const target = clamp(next.currentTime - item.anchor, 0, item.duration);
@@ -1040,8 +1043,74 @@
     return make('p', 'sheet-note', text);
   }
 
+  function controlRange(label, min, max, value, onInput, unit = '') {
+    const row = make('label', 'sheet-range');
+    const slider = make('input');
+    slider.type = 'range';
+    slider.min = min;
+    slider.max = max;
+    slider.value = value;
+    const result = make('output');
+    const show = () => { result.value = slider.value + unit; };
+    slider.addEventListener('input', () => { show(); onInput(slider.valueAsNumber); });
+    slider.addEventListener('keydown', event => event.stopPropagation());
+    show();
+    row.append(make('span', '', label), slider, result);
+    return row;
+  }
+
+  function audioControls(item) {
+    return [
+      controlRange('音量', 0, 100, item.volume * 100, value => {
+        item.volume = value / 100;
+        syncAudio(state.data);
+      }, '%'),
+      controlRange('淡入淡出', 0, 20, (item.fade || 0) * 10, value => {
+        item.fade = value / 10;
+        syncAudio(state.data);
+      }, ' × 0.1 秒')
+    ];
+  }
+
+  function pipSizeControl(item) {
+    return controlRange('画中画大小', 15, 75, parseFloat(item.node.style.width) || 34, value => {
+      item.node.style.width = value + '%';
+    }, '%');
+  }
+
+  function textStyles(current, change) {
+    const group = make('div', 'text-styles');
+    group.setAttribute('role', 'group');
+    group.setAttribute('aria-label', '文字样式');
+    for (const [value, label] of [['plain', '白色'], ['outline', '描边'], ['highlight', '黄色']]) {
+      const button = make('button', 'chip', label);
+      button.type = 'button';
+      button.setAttribute('aria-pressed', String(value === current));
+      button.addEventListener('click', () => {
+        change(value);
+        for (const choice of group.children) choice.setAttribute('aria-pressed', String(choice === button));
+      });
+      group.appendChild(button);
+    }
+    return group;
+  }
+
+  async function addClipAudio() {
+    if (!state.data?.duration) { toast('请先添加视频'); return; }
+    const selected = locate(state.data.currentTime);
+    if (!selected) { toast('请先添加视频'); return; }
+    const { clip, index } = selected;
+    const projectStart = startOfClip(index);
+    try {
+      const blob = clip.src.startsWith('blob:') ? await (await fetch(clip.src)).blob() : null;
+      addAudio(blob, { clip, projectStart, index });
+    } catch {
+      toast('无法读取当前视频的声音');
+    }
+  }
+
   function buildTimedEditSheet(item) {
-    const kind = { text: '文字', sticker: '贴纸', audio: '音频' }[item.kind];
+    const kind = { text: '文字', sticker: '贴纸', audio: '音频', pip: '画中画', effect: '特效' }[item.kind];
     const label = item.text ?? item.emoji ?? item.name;
     const nodes = [note('当前选中：' + kind + ' · ' + label)];
     if (item.kind === 'text') {
@@ -1067,11 +1136,23 @@
       const split = optionButton({ label: '分割', icon: 'i-split', onClick: () => splitTextAtPlayhead(item) });
       const at = state.data.currentTime;
       split.disabled = at - item.start < 0.1 || Math.min(item.end, state.data.duration) - at < 0.1;
-      nodes.push(form, optionGrid([split]));
+      nodes.push(form, textStyles(item.node.dataset.textStyle, value => { item.node.dataset.textStyle = value; }), optionGrid([split]));
     }
+    if (item.kind === 'sticker') {
+      nodes.push(controlRange('贴纸大小', 20, 90, parseFloat(getComputedStyle(item.node).fontSize), value => {
+        item.node.style.fontSize = value + 'px';
+        item.node.style.width = item.node.style.height = (value + 8) + 'px';
+      }));
+      nodes.push(controlRange('贴纸透明度', 10, 100, Number(item.node.style.opacity || 1) * 100,
+        value => { item.node.style.opacity = value / 100; }, '%'));
+    }
+    if (item.kind === 'audio') nodes.push(...audioControls(item));
+    if (item.kind === 'pip') nodes.push(pipSizeControl(item));
     nodes.push(optionGrid([
       optionButton({ label: '删除' + kind, icon: 'i-trash', onClick: () => {
         if (item.kind === 'audio') removeAudio();
+        else if (item.kind === 'pip') removePip();
+        else if (item.kind === 'effect') applyEffect('original');
         else item.node.querySelector('.ov-remove').click();
         closeSheet();
       } })
@@ -1108,6 +1189,7 @@
         name: state.audio.name,
         sub: '已添加到时间轴，会跟随播放头播放',
       }));
+      nodes.push(...audioControls(state.audio));
       nodes.push(optionGrid([
         optionButton({ label: '更换音频', icon: 'i-music', onClick: () => el.fileAudio.click() }),
         optionButton({ label: '移除音频', icon: 'i-trash', onClick: removeAudioFromUI }),
@@ -1115,10 +1197,9 @@
     } else {
       nodes.push(optionGrid([
         optionButton({ label: '本地音频', icon: 'i-music', onClick: () => el.fileAudio.click() }),
-        optionButton({ label: '提取音频', icon: 'i-audio-file', onClick: () => toast('已提取原视频声音（演示）') }),
-        optionButton({ label: '录音', icon: 'i-mic', onClick: () => toast('录音功能未接入（演示）') }),
+        optionButton({ label: '提取音频', icon: 'i-audio-file', onClick: addClipAudio }),
       ], 'cols-3'));
-      nodes.push(note('从本地选择一段音频，添加后与视频一起播放。'));
+      nodes.push(note('导入音频，或把白线所在视频片段的原声加入音轨。需要单独听音轨时，可以关闭视频原声。'));
     }
     return nodes;
   }
@@ -1132,20 +1213,8 @@
     input.setAttribute('aria-label', '输入文字');
     const add = make('button', 'btn primary', '添加');
     add.type = 'button';
-    const styles = make('div', 'text-styles');
-    styles.setAttribute('role', 'group');
-    styles.setAttribute('aria-label', '文字样式');
     let textStyle = 'plain';
-    for (const [value, label] of [['plain', '白色'], ['outline', '描边'], ['highlight', '黄色']]) {
-      const button = make('button', 'chip', label);
-      button.type = 'button';
-      button.setAttribute('aria-pressed', String(textStyle === value));
-      button.addEventListener('click', () => {
-        textStyle = value;
-        for (const choice of styles.children) choice.setAttribute('aria-pressed', String(choice === button));
-      });
-      styles.appendChild(button);
-    }
+    const styles = textStyles(textStyle, value => { textStyle = value; });
     const submit = () => {
       const text = input.value.trim();
       if (!text) {
@@ -1153,6 +1222,7 @@
         input.focus();
         return;
       }
+      if (!state.data?.duration) { toast('请先添加视频'); return; }
       addTextOverlay(text, textStyle);
       input.value = '';
       toast('文字已添加到画面');
@@ -1193,6 +1263,7 @@
       button.type = 'button';
       button.setAttribute('aria-label', `添加贴纸 ${emoji}`);
       button.addEventListener('click', () => {
+        if (!state.data?.duration) { toast('请先添加视频'); return; }
         addSticker(emoji);
         if (!state.stickerHintShown) {
           state.stickerHintShown = true;
@@ -1210,8 +1281,9 @@
       nodes.push(miniRow({
         icon: 'i-pip',
         name: '画中画 1',
-        sub: '跟随主视频播放，可随时移除',
+        sub: '拖动画面可改变位置，拖动轨道手柄可调整时间',
       }));
+      nodes.push(pipSizeControl(state.pip));
       nodes.push(optionGrid([
         optionButton({ label: '更换画面', icon: 'i-image', onClick: () => el.filePip.click() }),
         optionButton({ label: '移除画中画', icon: 'i-trash', onClick: removePipFromUI }),
@@ -1220,7 +1292,7 @@
       nodes.push(optionGrid([
         optionButton({ label: '选择视频', icon: 'i-image', onClick: () => el.filePip.click() }),
       ], 'cols-1'));
-      nodes.push(note('选择一段视频作为画中画，会叠加在画面右下角并跟随播放。'));
+      nodes.push(note('画中画从白线处开始，可在预览中拖动位置。'));
     }
     return nodes;
   }
@@ -1253,7 +1325,7 @@
       });
       grid.appendChild(button);
     }
-    return [grid, note('特效只应用在预览画面上，不会修改原始素材。')];
+    return [grid, note('特效默认从白线开始，拖动特效轨道可调整位置和时长。')];
   }
 
   function buildMaterialSheet() {
@@ -1346,7 +1418,7 @@
     });
 
     node.addEventListener('pointerdown', event => {
-      if (!event.isPrimary || event.button !== 0 || event.target.closest('.ov-remove, .ov-scale')) return;
+      if (!event.isPrimary || event.button !== 0 || event.target.closest('.ov-remove, .ov-scale, .pip-remove')) return;
       drag = {
         id: event.pointerId,
         x: event.clientX,
@@ -1411,7 +1483,7 @@
     addTimedTrack(item, 'text', text);
     if (!split) node.classList.remove('is-overlay-selected');
     node.addEventListener('pointerdown', event => {
-      if (event.target.closest('.ov-remove, .ov-scale')) return;
+      if (event.target.closest('.ov-remove, .ov-scale, .pip-remove')) return;
       state.selectedTimed = item;
       renderTimedTracks(state.data);
     });
@@ -1530,18 +1602,32 @@
 
   function applyEffect(id) {
     const effect = EFFECTS.find(item => item.id === id) || EFFECTS[0];
+    if (effect.id !== 'original' && !state.data?.duration) { toast('请先添加视频'); return; }
+    removeTimedTrack(state.effectItem);
+    state.effectItem = null;
     state.effect = effect.id;
-    el.preview.style.filter = effect.filter;
+    el.preview.style.filter = '';
+    if (effect.id !== 'original') {
+      const item = { name: effect.name, filter: effect.filter, ...overlayRange() };
+      state.effectItem = item;
+      addTimedTrack(item, 'effect', effect.name);
+    } else {
+      renderTimedTracks(state.data);
+    }
   }
-
   function addPip(file) {
+    if (!state.data?.duration) { toast('请先添加视频'); return; }
     removePip(false);
     const url = URL.createObjectURL(file);
     const wrap = make('div', 'pip-wrap');
+    wrap.style.left = '79%';
+    wrap.style.top = '76%';
+    wrap.style.width = '34%';
+    enableOverlayDrag(wrap, el.pipSlot);
     const video = make('video');
     video.src = url;
     video.muted = true;
-    video.loop = true;
+
     video.playsInline = true;
     video.preload = 'auto';
     video.setAttribute('playsinline', '');
@@ -1555,19 +1641,24 @@
     });
     wrap.appendChild(remove);
     el.pipSlot.appendChild(wrap);
-    state.pip = { wrap, el: video, url };
-    const alignPip = () => {
-      if (!state.pip || state.pip.el !== video || !state.data) return;
-      const duration = video.duration;
-      if (Number.isFinite(duration) && duration > 0) {
-        video.currentTime = state.data.currentTime % duration;
-      }
-      if (state.data.playing) video.play().catch(() => {});
-    };
-    if (video.readyState >= 1) alignPip();
-    else video.addEventListener('loadedmetadata', alignPip, { once: true });
-    toast('已添加画中画');
-    refreshSheet();
+    const start = overlayRange().start;
+    const item = { wrap, node: wrap, el: video, url, name: file.name, anchor: start, start };
+    state.pip = item;
+    video.addEventListener('loadedmetadata', () => {
+      if (state.pip !== item || !Number.isFinite(video.duration) || video.duration <= 0) return;
+      item.limit = start + video.duration;
+      item.end = Math.min(item.limit, state.data.duration);
+      addTimedTrack(item, 'pip', item.name);
+      syncBackgroundMedia(state.data);
+      refreshSheet();
+      toast('已添加画中画');
+    }, { once: true });
+    video.addEventListener('error', () => {
+      if (state.pip !== item) return;
+      removePip(false);
+      toast('无法读取画中画视频');
+    }, { once: true });
+    wrap.hidden = true;
   }
 
   function removePip(showToast = true) {
@@ -1575,7 +1666,9 @@
     state.pip.el.pause();
     state.pip.wrap.remove();
     URL.revokeObjectURL(state.pip.url);
+    removeTimedTrack(state.pip);
     state.pip = null;
+    renderTimedTracks(state.data);
     if (showToast) toast('已移除画中画');
     refreshSheet();
   }
@@ -1584,22 +1677,28 @@
     removePip();
   }
 
-  function addAudio(file) {
+  function addAudio(file, source) {
+    if (!state.data?.duration) { toast('请先添加视频'); return; }
     removeAudio(false);
-    const url = URL.createObjectURL(file);
-    const audio = new Audio(url);
+    const url = file ? URL.createObjectURL(file) : null;
+    const audio = new Audio(url || source.clip.src);
     audio.preload = 'auto';
     audio.volume = 0.9;
     const start = overlayRange().start;
-    const item = { name: file.name, url, el: audio, anchor: start, start, duration: 0 };
+    const audioStart = source?.projectStart ?? start;
+    const offset = source?.clip.start || 0;
+    const name = source ? '视频原声 · 片段 ' + (source.index + 1) : file.name;
+    const item = { name, url, el: audio, anchor: audioStart - offset,
+      start: audioStart, minStart: audioStart, duration: 0, volume: 0.9, fade: 0 };
     state.audio = item;
     audio.addEventListener('loadedmetadata', () => {
       if (state.audio !== item || !Number.isFinite(audio.duration) || audio.duration <= 0) return;
       item.duration = audio.duration;
-      item.limit = start + audio.duration;
+      item.limit = item.anchor + Math.min(audio.duration, source?.clip.end ?? audio.duration);
       item.end = Math.min(item.limit, state.data.duration);
       addTimedTrack(item, 'audio', item.name);
-      syncAudio(state.data);
+      toast('已添加音频');
+      syncBackgroundMedia(state.data);
     }, { once: true });
     audio.addEventListener('error', () => {
       if (state.audio !== item) return;
@@ -1607,7 +1706,7 @@
       refreshSheet();
       toast('无法读取这个音频文件');
     }, { once: true });
-    toast(`已添加音频「${file.name}」`, 2400);
+    toast('正在读取音频…');
     if (state.data) renderTimedTracks(state.data);
     refreshSheet();
   }
@@ -1615,7 +1714,7 @@
   function removeAudio(showToast = true) {
     if (!state.audio) return;
     state.audio.el.pause();
-    URL.revokeObjectURL(state.audio.url);
+    if (state.audio.url) URL.revokeObjectURL(state.audio.url);
     removeTimedTrack(state.audio);
     state.audio = null;
     if (state.data) renderTimedTracks(state.data);
@@ -1668,7 +1767,7 @@
     if (event.target.closest('button:not(.clip):not(.timed-label)')) return;
     const clip = event.target.closest('.clip');
     const track = event.target.closest('.timed-clip');
-    const item = track && [state.audio, ...state.texts, ...state.stickers]
+    const item = track && [state.audio, state.pip, state.effectItem, ...state.texts, ...state.stickers]
       .find(entry => entry?.track === track);
     const pan = {
       pointerId: event.pointerId,
@@ -1693,6 +1792,7 @@
           pan.itemEnd = item.end;
           pan.anchor = item.anchor;
           pan.limit = item.limit;
+          pan.minStart = item.minStart;
           renderTimedTracks(state.data);
         } else {
           pan.clipId = Number(clip.dataset.clipId);
@@ -1716,9 +1816,10 @@
       if (pan.anchor !== undefined) {
         item.anchor = pan.anchor + offset;
         item.limit = pan.limit + offset;
+        if (pan.minStart !== undefined) item.minStart = pan.minStart + offset;
       }
       renderTimedTracks(state.data);
-      syncAudio(state.data);
+      syncBackgroundMedia(state.data);
       return;
     }
 
@@ -1772,9 +1873,9 @@
       if (committed && (pan.item || pan.destination !== undefined)) {
         dragTimelineItem(pan, event.clientX - pan.startX);
       } else if (pan.item) {
-        Object.assign(pan.item, { start: pan.itemStart, end: pan.itemEnd, anchor: pan.anchor, limit: pan.limit });
+        Object.assign(pan.item, { start: pan.itemStart, end: pan.itemEnd, anchor: pan.anchor, limit: pan.limit, minStart: pan.minStart });
         renderTimedTracks(state.data);
-        syncAudio(state.data);
+        syncBackgroundMedia(state.data);
       }
       pan.node.classList.remove('is-lifted');
       pan.node.style.translate = '';
