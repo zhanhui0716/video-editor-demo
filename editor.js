@@ -10,6 +10,9 @@
     let playing = false;
     let pendingTime = null;
     let error = '';
+    const undoStack = [];
+    const redoStack = [];
+    const HISTORY_LIMIT = 60;
 
     const length = clip => clip.end - clip.start;
     const duration = () => clips.reduce((total, clip) => total + length(clip), 0);
@@ -26,6 +29,47 @@
       return null;
     }
 
+    function capture() {
+      return {
+        clips: clips.map(clip => ({ ...clip })),
+        currentTime,
+        selectedClipId
+      };
+    }
+
+    function record() {
+      undoStack.push(capture());
+      if (undoStack.length > HISTORY_LIMIT) undoStack.shift();
+      redoStack.length = 0;
+    }
+
+    function applyCapture(entry) {
+      clips = entry.clips.map(clip => ({ ...clip }));
+      currentTime = Math.max(0, Math.min(entry.currentTime, duration()));
+      selectedClipId = clips.some(clip => clip.id === entry.selectedClipId)
+        ? entry.selectedClipId
+        : (clipAt(currentTime) ? clipAt(currentTime).clip.id : null);
+      playing = false;
+      pendingTime = null;
+      error = '';
+      video.pause();
+      showPosition();
+    }
+
+    function undo() {
+      if (!undoStack.length) return false;
+      redoStack.push(capture());
+      applyCapture(undoStack.pop());
+      return true;
+    }
+
+    function redo() {
+      if (!redoStack.length) return false;
+      undoStack.push(capture());
+      applyCapture(redoStack.pop());
+      return true;
+    }
+
     function snapshot() {
       const position = clipAt(currentTime);
       return {
@@ -36,7 +80,9 @@
         playing,
         error,
         canSplit: Boolean(position && position.clip.id === selectedClipId &&
-          position.offset > 0.01 && length(position.clip) - position.offset > 0.01)
+          position.offset > 0.01 && length(position.clip) - position.offset > 0.01),
+        canUndo: undoStack.length > 0,
+        canRedo: redoStack.length > 0
       };
     }
 
@@ -122,6 +168,7 @@
       const { clip, index, offset } = clipAt(currentTime);
       const cut = clip.start + offset;
       const right = { ...clip, id: nextId++, start: cut };
+      record();
       clips.splice(index, 1, { ...clip, end: cut }, right);
       selectedClipId = right.id;
       publish();
@@ -131,11 +178,12 @@
     function deleteClip(clipId) {
       const index = clips.findIndex(clip => clip.id === clipId);
       if (index < 0) return;
+      record();
       const position = clipAt(currentTime);
       const nextTime = position.index === index
         ? startOf(index)
         : currentTime - (position.index > index ? length(clips[index]) : 0);
-      const [removed] = clips.splice(index, 1);
+      clips.splice(index, 1);
       if (clips.length) {
         seek(nextTime);
       } else {
@@ -143,15 +191,22 @@
         selectedClipId = null;
         showPosition();
       }
-      if (removed.src.startsWith('blob:') && !clips.some(clip => clip.src === removed.src)) {
-        URL.revokeObjectURL(removed.src);
-      }
+    }
+
+    function duplicateClip(clipId) {
+      const index = clips.findIndex(clip => clip.id === clipId);
+      if (index < 0) return false;
+      record();
+      clips.splice(index + 1, 0, { ...clips[index], id: nextId++ });
+      seek(startOf(index + 1));
+      return true;
     }
 
     function moveClip(clipId, toIndex) {
       const fromIndex = clips.findIndex(clip => clip.id === clipId);
       if (fromIndex < 0 || !Number.isInteger(toIndex) || toIndex < 0 ||
           toIndex >= clips.length || fromIndex === toIndex) return;
+      record();
       const position = clipAt(currentTime);
       const [clip] = clips.splice(fromIndex, 1);
       clips.splice(toIndex, 0, clip);
@@ -179,6 +234,7 @@
       }
       const position = clipAt(currentTime);
       const index = position ? position.index + 1 : 0;
+      record();
       clips.splice(index, 0, { id: nextId++, src, start: 0, end, name: file.name });
       seek(startOf(index));
     }
@@ -242,7 +298,10 @@
     requestAnimationFrame(tick);
     if (video.readyState >= 1) loadMetadata();
 
-    return { subscribe, seek, selectClip, splitAtPlayhead, deleteClip, moveClip, insertVideo, togglePlayback };
+    return {
+      subscribe, seek, selectClip, splitAtPlayhead, deleteClip, duplicateClip,
+      moveClip, insertVideo, togglePlayback, undo, redo
+    };
   }
 
   window.createEditor = createEditor;
