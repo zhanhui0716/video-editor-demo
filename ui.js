@@ -1009,6 +1009,20 @@
     input.setAttribute('aria-label', '输入文字');
     const add = make('button', 'btn primary', '添加');
     add.type = 'button';
+    const styles = make('div', 'text-styles');
+    styles.setAttribute('role', 'group');
+    styles.setAttribute('aria-label', '文字样式');
+    let textStyle = 'plain';
+    for (const [value, label] of [['plain', '白色'], ['outline', '描边'], ['highlight', '黄色']]) {
+      const button = make('button', 'chip', label);
+      button.type = 'button';
+      button.setAttribute('aria-pressed', String(textStyle === value));
+      button.addEventListener('click', () => {
+        textStyle = value;
+        for (const choice of styles.children) choice.setAttribute('aria-pressed', String(choice === button));
+      });
+      styles.appendChild(button);
+    }
     const submit = () => {
       const text = input.value.trim();
       if (!text) {
@@ -1016,7 +1030,7 @@
         input.focus();
         return;
       }
-      addTextOverlay(text);
+      addTextOverlay(text, textStyle);
       input.value = '';
       toast('文字已添加到画面');
     };
@@ -1040,11 +1054,11 @@
       presets.appendChild(chip);
     }
 
-    const nodes = [form, presets];
+    const nodes = [form, styles, presets];
     if (state.texts.length) {
       nodes.push(note(`画面中已有 ${state.texts.length} 段文字，点击文字右上角的 × 可以删除。`));
     } else {
-      nodes.push(note('文字会显示在画面中央，可多次添加。'));
+      nodes.push(note('添加后可在预览画面中拖动文字。'));
     }
     return nodes;
   }
@@ -1185,8 +1199,48 @@
   /* 文字 / 贴纸 / 特效 / 画中画 / 音频                                 */
   /* ------------------------------------------------------------------ */
 
-  function addTextOverlay(text) {
+  function enableOverlayDrag(node, layer) {
+    let drag = null;
+    let moved = false;
+    node.addEventListener('pointerdown', event => {
+      if (!event.isPrimary || event.button !== 0 || event.target.closest('.ov-remove')) return;
+      moved = false;
+      drag = {
+        id: event.pointerId,
+        x: event.clientX,
+        y: event.clientY,
+        left: parseFloat(node.style.left),
+        top: parseFloat(node.style.top)
+      };
+      node.setPointerCapture(event.pointerId);
+    });
+    node.addEventListener('pointermove', event => {
+      if (!drag || drag.id !== event.pointerId) return;
+      const dx = event.clientX - drag.x;
+      const dy = event.clientY - drag.y;
+      if (!moved && Math.hypot(dx, dy) < 5) return;
+      moved = true;
+      const { width, height } = layer.getBoundingClientRect();
+      const clamp = (value, inset) => Math.max(inset, Math.min(100 - inset, value));
+      const xInset = Math.min(50, node.offsetWidth / width * 50);
+      const yInset = Math.min(50, node.offsetHeight / height * 50);
+      node.style.left = clamp(drag.left + dx / width * 100, xInset) + '%';
+      node.style.top = clamp(drag.top + dy / height * 100, yInset) + '%';
+    });
+    node.addEventListener('lostpointercapture', () => { drag = null; });
+    node.addEventListener('click', event => {
+      if (!moved || !event.detail) return;
+      moved = false;
+      event.stopImmediatePropagation();
+    }, true);
+  }
+
+  function addTextOverlay(text, textStyle) {
     const node = make('div', 'text-overlay');
+    node.dataset.textStyle = textStyle;
+    node.style.left = '50%';
+    node.style.top = Math.min(82, 48 + state.texts.length * 9) + '%';
+    enableOverlayDrag(node, el.textStack);
     node.appendChild(document.createTextNode(text));
     const remove = make('button', 'ov-remove', '×');
     remove.type = 'button';
@@ -1210,7 +1264,7 @@
     if (!noteEl) return;
     noteEl.textContent = state.texts.length
       ? `画面中已有 ${state.texts.length} 段文字，点击文字右上角的 × 可以删除。`
-      : '文字会显示在画面中央，可多次添加。';
+      : '添加后可在预览画面中拖动文字。';
   }
 
   function addSticker(emoji) {
@@ -1226,6 +1280,7 @@
       state.stickers = state.stickers.filter(item => item.node !== node);
       toast('已移除贴纸');
     });
+    enableOverlayDrag(node, el.stickerLayer);
     el.stickerLayer.appendChild(node);
     state.stickers.push({ node, emoji });
   }

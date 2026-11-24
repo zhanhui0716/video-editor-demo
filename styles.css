@@ -1750,3 +1750,20 @@ button:active {
     font-size: 14px;
   }
 }
+
+.text-styles { display: flex; flex-wrap: wrap; gap: 8px; }
+.text-styles [aria-pressed="true"] { outline: 2px solid currentColor; outline-offset: 2px; }
+.text-stack { display: block; inset: 0; }
+.text-overlay, .sticker {
+  position: absolute;
+  transform: translate(-50%, -50%);
+  touch-action: none;
+  cursor: grab;
+  user-select: none;
+}
+.text-overlay:active, .sticker:active { cursor: grabbing; }
+.text-overlay[data-text-style="outline"], .text-overlay[data-text-style="highlight"] {
+  -webkit-text-stroke: 3px #16121b;
+  paint-order: stroke fill;
+}
+.text-overlay[data-text-style="highlight"] { color: #ffda57; }
