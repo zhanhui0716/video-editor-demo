@@ -1,9 +1,6 @@
 (() => {
   function createEditor(video) {
     const listeners = new Set();
-    const undoStack = [];
-    const redoStack = [];
-    const importedSources = new Set();
     const sampleSource = video.getAttribute('src');
     let source = sampleSource;
     let clips = [];
@@ -13,6 +10,10 @@
     let playing = false;
     let pendingTime = null;
     let error = '';
+    const undoStack = [];
+    const redoStack = [];
+    const importedSources = new Set();
+    const HISTORY_LIMIT = 60;
 
     const length = clip => clip.end - clip.start;
     const duration = () => clips.reduce((total, clip) => total + length(clip), 0);
@@ -29,6 +30,61 @@
       return null;
     }
 
+    function capture() {
+      return {
+        clips: clips.map(clip => ({ ...clip })),
+        currentTime,
+        selectedClipId
+      };
+    }
+
+    function record() {
+      undoStack.push(capture());
+      if (undoStack.length > HISTORY_LIMIT) undoStack.shift();
+      redoStack.length = 0;
+      releaseUnusedSources();
+    }
+
+    function releaseUnusedSources() {
+      const retained = new Set();
+      for (const clip of clips) retained.add(clip.src);
+      for (const entry of [...undoStack, ...redoStack]) {
+        for (const clip of entry.clips) retained.add(clip.src);
+      }
+      for (const src of importedSources) {
+        if (retained.has(src)) continue;
+        URL.revokeObjectURL(src);
+        importedSources.delete(src);
+      }
+    }
+
+    function applyCapture(entry) {
+      clips = entry.clips.map(clip => ({ ...clip }));
+      currentTime = Math.max(0, Math.min(entry.currentTime, duration()));
+      selectedClipId = clips.some(clip => clip.id === entry.selectedClipId)
+        ? entry.selectedClipId
+        : (clipAt(currentTime) ? clipAt(currentTime).clip.id : null);
+      playing = false;
+      pendingTime = null;
+      error = '';
+      video.pause();
+      showPosition();
+    }
+
+    function undo() {
+      if (!undoStack.length) return false;
+      redoStack.push(capture());
+      applyCapture(undoStack.pop());
+      return true;
+    }
+
+    function redo() {
+      if (!redoStack.length) return false;
+      undoStack.push(capture());
+      applyCapture(redoStack.pop());
+      return true;
+    }
+
     function snapshot() {
       const position = clipAt(currentTime);
       return {
@@ -38,11 +94,11 @@
         selectedClipId,
         playing,
         muted: video.muted,
-        canUndo: undoStack.length > 0,
-        canRedo: redoStack.length > 0,
         error,
         canSplit: Boolean(position && position.clip.id === selectedClipId &&
-          position.offset > 0.01 && length(position.clip) - position.offset > 0.01)
+          position.offset > 0.01 && length(position.clip) - position.offset > 0.01),
+        canUndo: undoStack.length > 0,
+        canRedo: redoStack.length > 0
       };
     }
 
@@ -123,53 +179,12 @@
       }
     }
 
-    function projectState() {
-      return { clips: [...clips], currentTime, selectedClipId };
-    }
-
-    function releaseUnusedSources() {
-      const retained = new Set(clips.map(clip => clip.src));
-      for (const state of [...undoStack, ...redoStack]) {
-        for (const clip of state.clips) retained.add(clip.src);
-      }
-      for (const src of importedSources) {
-        if (retained.has(src)) continue;
-        URL.revokeObjectURL(src);
-        importedSources.delete(src);
-      }
-    }
-
-    function rememberEdit() {
-      undoStack.push(projectState());
-      if (undoStack.length > 30) undoStack.shift();
-      redoStack.length = 0;
-      releaseUnusedSources();
-    }
-
-    function restore(from, to) {
-      if (!from.length) return;
-      to.push(projectState());
-      const state = from.pop();
-      playing = false;
-      video.pause();
-      clips = state.clips;
-      currentTime = state.currentTime;
-      selectedClipId = state.selectedClipId;
-      error = '';
-      showPosition();
-    }
-
-    function toggleMute() {
-      video.muted = !video.muted;
-      publish();
-    }
-
     function splitAtPlayhead() {
       if (!snapshot().canSplit) return false;
       const { clip, index, offset } = clipAt(currentTime);
-      rememberEdit();
       const cut = clip.start + offset;
       const right = { ...clip, id: nextId++, start: cut };
+      record();
       clips.splice(index, 1, { ...clip, end: cut }, right);
       selectedClipId = right.id;
       publish();
@@ -179,11 +194,11 @@
     function deleteClip(clipId) {
       const index = clips.findIndex(clip => clip.id === clipId);
       if (index < 0) return;
+      record();
       const position = clipAt(currentTime);
       const nextTime = position.index === index
         ? startOf(index)
         : currentTime - (position.index > index ? length(clips[index]) : 0);
-      rememberEdit();
       clips.splice(index, 1);
       if (clips.length) {
         seek(nextTime);
@@ -192,15 +207,23 @@
         selectedClipId = null;
         showPosition();
       }
+    }
 
+    function duplicateClip(clipId) {
+      const index = clips.findIndex(clip => clip.id === clipId);
+      if (index < 0) return false;
+      record();
+      clips.splice(index + 1, 0, { ...clips[index], id: nextId++ });
+      seek(startOf(index + 1));
+      return true;
     }
 
     function moveClip(clipId, toIndex) {
       const fromIndex = clips.findIndex(clip => clip.id === clipId);
       if (fromIndex < 0 || !Number.isInteger(toIndex) || toIndex < 0 ||
           toIndex >= clips.length || fromIndex === toIndex) return;
+      record();
       const position = clipAt(currentTime);
-      rememberEdit();
       const [clip] = clips.splice(fromIndex, 1);
       clips.splice(toIndex, 0, clip);
       seek(startOf(clips.indexOf(position.clip)) + position.offset);
@@ -227,10 +250,15 @@
       }
       const position = clipAt(currentTime);
       const index = position ? position.index + 1 : 0;
-      rememberEdit();
+      record();
       importedSources.add(src);
       clips.splice(index, 0, { id: nextId++, src, start: 0, end, name: file.name });
       seek(startOf(index));
+    }
+
+    function toggleMute() {
+      video.muted = !video.muted;
+      publish();
     }
 
     function togglePlayback() {
@@ -293,10 +321,8 @@
     if (video.readyState >= 1) loadMetadata();
 
     return {
-      subscribe, seek, selectClip, splitAtPlayhead, deleteClip, moveClip, insertVideo,
-      togglePlayback, toggleMute,
-      undo: () => restore(undoStack, redoStack),
-      redo: () => restore(redoStack, undoStack)
+      subscribe, seek, selectClip, splitAtPlayhead, deleteClip, duplicateClip,
+      moveClip, insertVideo, togglePlayback, toggleMute, undo, redo
     };
   }
 
