@@ -59,13 +59,13 @@
 | `index.html` | Mac | 竖屏界面结构、SVG 图标、面板与弹窗容器 |
 | `styles.css` | Mac | 深色剪映风格、手机画幅、播放头、时间轴、面板动画 |
 | `ui.js` | Mac | 状态渲染、时间轴手势、抽帧缩略图、面板 / 弹窗 / 快捷键 |
-| `editor.js` | Windows | 项目状态、素材定位、分割、删除、复制、撤销重做 |
+| `editor.js` | Windows | 项目状态、素材定位、分割、删除、复制、撤销重做、静音与素材清理 |
 
 ## 接口约定
 
 `createEditor(video)` 创建编辑器。`subscribe(listener)` 立即发送一次状态，并在状态变化后再次通知，返回取消订阅函数。
 
-状态字段：`clips`、`currentTime`、`duration`、`selectedClipId`、`playing`、`canSplit`、`canUndo`、`canRedo`、`error`。
+状态字段：`clips`、`currentTime`、`duration`、`selectedClipId`、`playing`、`muted`、`canSplit`、`canUndo`、`canRedo`、`error`。
 
 | 调用 | 行为 |
 | --- | --- |
@@ -78,6 +78,7 @@
 | `undo()` / `redo()` | 撤销 / 重做最近一次片段编辑 |
 | `insertVideo(file)` | 读取本地视频，插入到播放头所在片段之后 |
 | `togglePlayback()` | 开始或暂停项目预览 |
+| `toggleMute()` | 切换预览原声静音 |
 
 时间统一用秒。片段用稳定的 ID 识别，`start` 和 `end` 是素材时间，项目位置由前面片段的时长累加。分割时左段保留原 ID，右段获得新 ID。
 

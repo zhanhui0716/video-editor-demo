@@ -12,6 +12,7 @@
     let error = '';
     const undoStack = [];
     const redoStack = [];
+    const importedSources = new Set();
     const HISTORY_LIMIT = 60;
 
     const length = clip => clip.end - clip.start;
@@ -41,6 +42,20 @@
       undoStack.push(capture());
       if (undoStack.length > HISTORY_LIMIT) undoStack.shift();
       redoStack.length = 0;
+      releaseUnusedSources();
+    }
+
+    function releaseUnusedSources() {
+      const retained = new Set();
+      for (const clip of clips) retained.add(clip.src);
+      for (const entry of [...undoStack, ...redoStack]) {
+        for (const clip of entry.clips) retained.add(clip.src);
+      }
+      for (const src of importedSources) {
+        if (retained.has(src)) continue;
+        URL.revokeObjectURL(src);
+        importedSources.delete(src);
+      }
     }
 
     function applyCapture(entry) {
@@ -78,6 +93,7 @@
         duration: duration(),
         selectedClipId,
         playing,
+        muted: video.muted,
         error,
         canSplit: Boolean(position && position.clip.id === selectedClipId &&
           position.offset > 0.01 && length(position.clip) - position.offset > 0.01),
@@ -235,8 +251,14 @@
       const position = clipAt(currentTime);
       const index = position ? position.index + 1 : 0;
       record();
+      importedSources.add(src);
       clips.splice(index, 0, { id: nextId++, src, start: 0, end, name: file.name });
       seek(startOf(index));
+    }
+
+    function toggleMute() {
+      video.muted = !video.muted;
+      publish();
     }
 
     function togglePlayback() {
@@ -300,7 +322,7 @@
 
     return {
       subscribe, seek, selectClip, splitAtPlayhead, deleteClip, duplicateClip,
-      moveClip, insertVideo, togglePlayback, undo, redo
+      moveClip, insertVideo, togglePlayback, toggleMute, undo, redo
     };
   }
 

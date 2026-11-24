@@ -529,11 +529,12 @@
   }
 
   function renderMute() {
-    el.mute.classList.toggle('is-muted', state.muted);
-    el.mute.setAttribute('aria-pressed', String(state.muted));
-    el.mute.setAttribute('aria-label', state.muted ? '开启原声' : '关闭原声');
-    el.muteLabel.textContent = state.muted ? '开启原声' : '关闭原声';
-    el.muteIcon.setAttribute('href', state.muted ? '#i-mute' : '#i-volume');
+    const muted = state.data ? state.data.muted : state.muted;
+    el.mute.classList.toggle('is-muted', muted);
+    el.mute.setAttribute('aria-pressed', String(muted));
+    el.mute.setAttribute('aria-label', muted ? '开启原声' : '关闭原声');
+    el.muteLabel.textContent = muted ? '开启原声' : '关闭原声';
+    el.muteIcon.setAttribute('href', muted ? '#i-mute' : '#i-volume');
   }
 
   function renderEmptyState(next) {
@@ -692,10 +693,8 @@
   }
 
   function toggleMute() {
-    state.muted = !state.muted;
-    el.preview.muted = state.muted;
-    renderMute();
-    toast(state.muted ? '已关闭原声' : '已开启原声');
+    editor.toggleMute();
+    toast(state.data && state.data.muted ? '已关闭原声' : '已开启原声');
   }
 
   function inPreviewMode() {
