@@ -34,12 +34,12 @@
     exportBtn: $('#btn-export'),
     play: $('#btn-play'),
     playIcon: $('#play-icon use'),
-    split: $('#btn-split'),
     undo: $('#btn-undo'),
     redo: $('#btn-redo'),
     fullscreen: $('#btn-fullscreen'),
     fullscreenIcon: $('#fullscreen-icon use'),
     timeCurrent: $('#time-current'),
+    projectPosition: $('#project-position'),
     timeTotal: $('#time-total'),
     timeline: $('#timeline'),
     timelineContent: $('#timeline-content'),
@@ -51,8 +51,7 @@
     muteIcon: $('#mute-icon use'),
     muteLabel: $('#mute-label'),
     audioRow: $('#audio-row'),
-    audioClip: $('#audio-clip'),
-    audioClipName: $('#audio-clip-name'),
+    timedTracks: $('#timed-tracks'),
     audioAdd: $('#btn-add-audio'),
     addMedia: $('#btn-add-media'),
     textStack: $('#text-stack'),
@@ -99,8 +98,10 @@
     lastAudioSync: 0,
     pip: null,
     texts: [],
+    selectedTimed: null,
     stickers: [],
     effect: 'original',
+    effectItem: null,
     sheet: null,
     modalBusy: false,
     exportTimer: null,
@@ -386,7 +387,6 @@
   /* ------------------------------------------------------------------ */
 
   function onState(next) {
-    const previous = state.data;
     state.data = next;
     const signature = clipListSignature(next.clips);
     const needsClips = signature !== state.clipSignature || state.layoutDirty;
@@ -398,15 +398,20 @@
     }
     renderTime(next);
     renderTransport(next);
-    renderTimeline(next);
-    renderAudio(next);
+    renderTimedTracks(next);
     renderCover(next, needsClips);
     renderEmptyState(next);
     renderMute();
-    syncBackgroundMedia(next, previous);
+    syncBackgroundMedia(next);
   }
 
   function renderTime(next) {
+    const position = el.projectPosition;
+    position.max = next.duration;
+    position.value = next.currentTime;
+    position.disabled = !next.duration;
+    position.style.setProperty('--project-progress', (next.duration ? next.currentTime / next.duration * 100 : 0) + '%');
+    position.setAttribute('aria-valuetext', fmtTime(next.currentTime) + ' / ' + fmtTime(next.duration));
     el.timeCurrent.textContent = fmtTime(next.currentTime);
     el.timeTotal.textContent = fmtTime(next.duration);
   }
@@ -414,7 +419,6 @@
   function renderTransport(next) {
     el.playIcon.setAttribute('href', next.playing ? '#i-pause' : '#i-play');
     el.play.setAttribute('aria-label', next.playing ? '暂停' : '播放');
-    el.split.setAttribute('aria-disabled', String(!next.canSplit));
     el.undo.classList.toggle('is-off', !next.canUndo);
     el.redo.classList.toggle('is-off', !next.canRedo);
     el.undo.setAttribute('aria-disabled', String(!next.canUndo));
@@ -422,6 +426,11 @@
   }
 
   function renderTimeline(next) {
+    for (const clip of el.clips.children) {
+      const selected = !state.selectedTimed && Number(clip.dataset.clipId) === next.selectedClipId;
+      clip.classList.toggle('is-selected', selected);
+      clip.setAttribute('aria-pressed', String(selected));
+    }
     const x = state.playheadX - next.currentTime * state.pps;
     el.timelineContent.style.transform = `translate3d(${x}px, 0, 0)`;
   }
@@ -502,32 +511,106 @@
     }
   }
 
-  function renderAudio(next) {
-    if (!next.clips.length) {
-      el.audioRow.hidden = true;
-      el.audioClip.hidden = true;
-      el.mute.hidden = true;
-      el.cover.hidden = true;
-      return;
-    }
-    el.mute.hidden = false;
-    el.cover.hidden = false;
-    const projectStartX = state.playheadX - next.currentTime * state.pps;
-    const left = Math.max(0, projectStartX);
-    const width = Math.max(0, el.timeline.clientWidth - left);
-    el.audioRow.hidden = false;
-    el.audioRow.style.left = `${left}px`;
-    el.audioRow.style.width = `${width}px`;
-    if (state.audio) {
-      el.audioClip.hidden = false;
-      const audioWidth = Math.max(52, (state.audio.duration || 0) * state.pps);
-      el.audioClip.style.left = `${projectStartX}px`;
-      el.audioClip.style.width = `${audioWidth}px`;
-    } else {
-      el.audioClip.hidden = true;
+  function renderTimedTracks(next) {
+    renderTimeline(next);
+    const hasVideo = next.clips.length > 0;
+    const origin = state.playheadX - next.currentTime * state.pps;
+    const left = Math.max(0, origin);
+    el.mute.hidden = !hasVideo;
+    el.cover.hidden = !hasVideo;
+    el.audioRow.hidden = !hasVideo || Boolean(state.audio?.track);
+    el.audioRow.style.left = left + 'px';
+    el.audioRow.style.width = Math.max(0, el.timeline.clientWidth - left) + 'px';
+    const overlays = [...state.texts, ...state.stickers, state.pip, state.effectItem].filter(Boolean);
+    el.timeline.classList.toggle('has-extra-tracks', overlays.length > 0);
+    const items = [state.audio, ...overlays];
+    const activeLanes = ['audio', 'text', 'sticker', 'pip', 'effect'].filter(kind =>
+      kind === 'audio' || overlays.some(item => item.kind === kind));
+    for (const item of items) {
+      if (!item?.track) continue;
+      const end = Math.min(item.end, next.duration);
+      const visible = hasVideo && end > item.start;
+      item.track.hidden = !visible;
+      item.track.style.left = (origin + item.start * state.pps) + 'px';
+      item.track.style.width = Math.max(0, (end - item.start) * state.pps) + 'px';
+      item.track.style.setProperty('--timed-lane', activeLanes.indexOf(item.kind));
+      const selected = item === state.selectedTimed;
+      item.track.classList.toggle('is-selected', selected);
+      item.node?.classList.toggle('is-overlay-selected', selected);
+      item.track.querySelector('.timed-label').setAttribute('aria-pressed', String(selected));
+      for (const handle of item.track.querySelectorAll('.timed-handle')) handle.hidden = !selected;
+      const active = visible && next.currentTime >= item.start && next.currentTime < end;
+      if (item.node) item.node.hidden = !active;
+      if (item.kind === 'effect') el.preview.style.filter = active ? item.filter : '';
     }
   }
 
+  function addTimedTrack(item, kind, label) {
+    const track = make('div', 'timed-clip timed-' + kind);
+    const select = make('button', 'timed-label', label);
+    select.type = 'button';
+    select.addEventListener('click', () => {
+      state.selectedTimed = item;
+      renderTimedTracks(state.data);
+    });
+    track.appendChild(select);
+    for (const edge of ['start', 'end']) {
+      const handle = make('button', 'timed-handle timed-' + edge, '⋮');
+      handle.type = 'button';
+      handle.setAttribute('aria-label', edge === 'start' ? '调整开始时间' : '调整结束时间');
+      handle.hidden = true;
+      let drag = null;
+
+      function trim(value) {
+        const max = Math.min(state.data.duration, item.limit ?? Infinity);
+        const min = Math.max(0, item.minStart ?? item.anchor ?? 0);
+        const minimumLength = Math.min(0.2, Math.max(0, max - min));
+        if (edge === 'start') {
+          item.start = clamp(value, min, Math.max(min, Math.min(item.end, max) - minimumLength));
+        } else {
+          item.end = clamp(value, Math.min(max, item.start + minimumLength), max);
+        }
+        renderTimedTracks(state.data);
+        syncBackgroundMedia(state.data);
+      }
+
+      handle.addEventListener('pointerdown', event => {
+        if (!event.isPrimary || event.button !== 0) return;
+        event.stopPropagation();
+        if (state.data.playing) editor.togglePlayback();
+        drag = { id: event.pointerId, x: event.clientX, time: item[edge], pps: state.pps };
+        handle.setPointerCapture(event.pointerId);
+      });
+      function updateDrag(event) {
+        if (drag?.id === event.pointerId) trim(drag.time + (event.clientX - drag.x) / drag.pps);
+      }
+      handle.addEventListener('pointermove', updateDrag);
+      handle.addEventListener('pointerup', updateDrag);
+      handle.addEventListener('lostpointercapture', () => { drag = null; });
+      handle.addEventListener('keydown', event => {
+        if (!['ArrowLeft', 'ArrowRight'].includes(event.key)) return;
+        event.preventDefault();
+        event.stopPropagation();
+        trim(item[edge] + (event.key === 'ArrowRight' ? 0.1 : -0.1));
+      });
+      track.appendChild(handle);
+    }
+    Object.assign(item, { kind, track });
+    el.timedTracks.appendChild(track);
+    state.selectedTimed = item;
+    renderTimedTracks(state.data);
+  }
+
+  function removeTimedTrack(item) {
+    item?.track?.remove();
+    if (state.selectedTimed === item) state.selectedTimed = null;
+  }
+
+  function overlayRange() {
+    const duration = state.data?.duration || 0;
+    const start = Math.min(state.data?.currentTime || 0, Math.max(0, duration - 0.2));
+    return { start, end: Math.min(duration, start + 3) };
+  }
   function renderMute() {
     const muted = state.data ? state.data.muted : state.muted;
     el.mute.classList.toggle('is-muted', muted);
@@ -562,39 +645,42 @@
   /* 预览、音频、画中画同步                                             */
   /* ------------------------------------------------------------------ */
 
-  function syncBackgroundMedia(next, previous) {
+  function syncBackgroundMedia(next) {
     syncAudio(next);
-    if (!state.pip) return;
-    const pip = state.pip.el;
-    if (next.playing) {
-      if (pip.paused) pip.play().catch(() => {});
-    } else if (!pip.paused) {
-      pip.pause();
-    }
-    if (!next.playing && next.currentTime !== (previous && previous.currentTime)) {
-      const target = Number.isFinite(pip.duration) && pip.duration > 0
-        ? next.currentTime % pip.duration
-        : 0;
-      if (Math.abs(pip.currentTime - target) > 0.35) pip.currentTime = target;
+    const item = state.pip;
+    if (!item?.track || item.el.readyState < 1) return;
+    const video = item.el;
+    const active = next.currentTime >= item.start && next.currentTime < Math.min(next.duration, item.end);
+    const target = clamp(next.currentTime - item.anchor, 0, video.duration);
+    if (Math.abs(video.currentTime - target) > (next.playing ? 0.3 : 0.04)) video.currentTime = target;
+    if (active && next.playing) {
+      if (video.paused) video.play().catch(() => {});
+    } else if (!video.paused) {
+      video.pause();
     }
   }
-
   function syncAudio(next) {
-    if (!state.audio) return;
-    const audio = state.audio.el;
-    if (audio.readyState < 1) return;
-    const duration = Number.isFinite(audio.duration) ? audio.duration : Infinity;
-    const target = clamp(next.currentTime, 0, duration);
-    if (next.playing) {
-      if (audio.paused) audio.play().catch(() => {});
-      const now = performance.now();
-      if (now - state.lastAudioSync > 500) {
-        state.lastAudioSync = now;
-        if (Math.abs(audio.currentTime - target) > 0.45) audio.currentTime = target;
-      }
-    } else {
+    const item = state.audio;
+    if (!item?.track || item.el.readyState < 1) return;
+    const audio = item.el;
+    const elapsed = next.currentTime - item.start;
+    const remaining = Math.min(next.duration, item.end) - next.currentTime;
+    const fade = Math.min(item.fade || 0, (item.end - item.start) / 2);
+    audio.volume = item.volume * (fade ? clamp(Math.min(elapsed, remaining) / fade, 0, 1) : 1);
+    const active = next.playing && next.currentTime >= item.start &&
+      next.currentTime < Math.min(item.end, next.duration);
+    const target = clamp(next.currentTime - item.anchor, 0, item.duration);
+    if (!active) {
       if (!audio.paused) audio.pause();
-      if (Math.abs(audio.currentTime - target) > 0.12) audio.currentTime = target;
+      if (Math.abs(audio.currentTime - target) > 0.08) audio.currentTime = target;
+      return;
+    }
+    if (audio.paused) {
+      audio.currentTime = target;
+      audio.play().catch(() => {});
+    } else if (performance.now() - state.lastAudioSync > 500) {
+      state.lastAudioSync = performance.now();
+      if (Math.abs(audio.currentTime - target) > 0.25) audio.currentTime = target;
     }
   }
 
@@ -957,7 +1043,125 @@
     return make('p', 'sheet-note', text);
   }
 
+  function controlRange(label, min, max, value, onInput, unit = '') {
+    const row = make('label', 'sheet-range');
+    const slider = make('input');
+    slider.type = 'range';
+    slider.min = min;
+    slider.max = max;
+    slider.value = value;
+    const result = make('output');
+    const show = () => { result.value = slider.value + unit; };
+    slider.addEventListener('input', () => { show(); onInput(slider.valueAsNumber); });
+    slider.addEventListener('keydown', event => event.stopPropagation());
+    show();
+    row.append(make('span', '', label), slider, result);
+    return row;
+  }
+
+  function audioControls(item) {
+    return [
+      controlRange('音量', 0, 100, item.volume * 100, value => {
+        item.volume = value / 100;
+        syncAudio(state.data);
+      }, '%'),
+      controlRange('淡入淡出', 0, 20, (item.fade || 0) * 10, value => {
+        item.fade = value / 10;
+        syncAudio(state.data);
+      }, ' × 0.1 秒')
+    ];
+  }
+
+  function pipSizeControl(item) {
+    return controlRange('画中画大小', 15, 75, parseFloat(item.node.style.width) || 34, value => {
+      item.node.style.width = value + '%';
+    }, '%');
+  }
+
+  function textStyles(current, change) {
+    const group = make('div', 'text-styles');
+    group.setAttribute('role', 'group');
+    group.setAttribute('aria-label', '文字样式');
+    for (const [value, label] of [['plain', '白色'], ['outline', '描边'], ['highlight', '黄色']]) {
+      const button = make('button', 'chip', label);
+      button.type = 'button';
+      button.setAttribute('aria-pressed', String(value === current));
+      button.addEventListener('click', () => {
+        change(value);
+        for (const choice of group.children) choice.setAttribute('aria-pressed', String(choice === button));
+      });
+      group.appendChild(button);
+    }
+    return group;
+  }
+
+  async function addClipAudio() {
+    if (!state.data?.duration) { toast('请先添加视频'); return; }
+    const selected = locate(state.data.currentTime);
+    if (!selected) { toast('请先添加视频'); return; }
+    const { clip, index } = selected;
+    const projectStart = startOfClip(index);
+    try {
+      const blob = clip.src.startsWith('blob:') ? await (await fetch(clip.src)).blob() : null;
+      addAudio(blob, { clip, projectStart, index });
+    } catch {
+      toast('无法读取当前视频的声音');
+    }
+  }
+
+  function buildTimedEditSheet(item) {
+    const kind = { text: '文字', sticker: '贴纸', audio: '音频', pip: '画中画', effect: '特效' }[item.kind];
+    const label = item.text ?? item.emoji ?? item.name;
+    const nodes = [note('当前选中：' + kind + ' · ' + label)];
+    if (item.kind === 'text') {
+      const form = make('form', 'text-form');
+      const input = make('input', 'text-input');
+      input.value = item.text;
+      input.maxLength = 30;
+      input.required = true;
+      input.setAttribute('aria-label', '编辑选中文字');
+      const save = make('button', 'btn primary', '保存文字');
+      save.type = 'submit';
+      form.append(input, save);
+      form.addEventListener('submit', event => {
+        event.preventDefault();
+        const value = input.value.trim();
+        if (!value) return;
+        item.text = value;
+        item.node.querySelector('.overlay-text-content').textContent = value;
+        item.node.setAttribute('aria-label', '移动文字：' + value);
+        item.track.querySelector('.timed-label').textContent = value;
+        closeSheet();
+      });
+      const split = optionButton({ label: '分割', icon: 'i-split', onClick: () => splitTextAtPlayhead(item) });
+      const at = state.data.currentTime;
+      split.disabled = at - item.start < 0.1 || Math.min(item.end, state.data.duration) - at < 0.1;
+      nodes.push(form, textStyles(item.node.dataset.textStyle, value => { item.node.dataset.textStyle = value; }), optionGrid([split]));
+    }
+    if (item.kind === 'sticker') {
+      nodes.push(controlRange('贴纸大小', 20, 90, parseFloat(getComputedStyle(item.node).fontSize), value => {
+        item.node.style.fontSize = value + 'px';
+        item.node.style.width = item.node.style.height = (value + 8) + 'px';
+      }));
+      nodes.push(controlRange('贴纸透明度', 10, 100, Number(item.node.style.opacity || 1) * 100,
+        value => { item.node.style.opacity = value / 100; }, '%'));
+    }
+    if (item.kind === 'audio') nodes.push(...audioControls(item));
+    if (item.kind === 'pip') nodes.push(pipSizeControl(item));
+    nodes.push(optionGrid([
+      optionButton({ label: '删除' + kind, icon: 'i-trash', onClick: () => {
+        if (item.kind === 'audio') removeAudio();
+        else if (item.kind === 'pip') removePip();
+        else if (item.kind === 'effect') applyEffect('original');
+        else item.node.querySelector('.ov-remove').click();
+        closeSheet();
+      } })
+    ]), note('拖动轨道片段两端可调整起止时间。'));
+    return nodes;
+  }
+
   function buildEditSheet() {
+    if (state.selectedTimed) return buildTimedEditSheet(state.selectedTimed);
     const data = state.data;
     const selectedIndex = data && data.selectedClipId !== null
       ? data.clips.findIndex(clip => clip.id === data.selectedClipId)
@@ -985,6 +1189,7 @@
         name: state.audio.name,
         sub: '已添加到时间轴，会跟随播放头播放',
       }));
+      nodes.push(...audioControls(state.audio));
       nodes.push(optionGrid([
         optionButton({ label: '更换音频', icon: 'i-music', onClick: () => el.fileAudio.click() }),
         optionButton({ label: '移除音频', icon: 'i-trash', onClick: removeAudioFromUI }),
@@ -992,10 +1197,9 @@
     } else {
       nodes.push(optionGrid([
         optionButton({ label: '本地音频', icon: 'i-music', onClick: () => el.fileAudio.click() }),
-        optionButton({ label: '提取音频', icon: 'i-audio-file', onClick: () => toast('已提取原视频声音（演示）') }),
-        optionButton({ label: '录音', icon: 'i-mic', onClick: () => toast('录音功能未接入（演示）') }),
+        optionButton({ label: '提取音频', icon: 'i-audio-file', onClick: addClipAudio }),
       ], 'cols-3'));
-      nodes.push(note('从本地选择一段音频，添加后与视频一起播放。'));
+      nodes.push(note('导入音频，或把白线所在视频片段的原声加入音轨。需要单独听音轨时，可以关闭视频原声。'));
     }
     return nodes;
   }
@@ -1009,6 +1213,8 @@
     input.setAttribute('aria-label', '输入文字');
     const add = make('button', 'btn primary', '添加');
     add.type = 'button';
+    let textStyle = 'plain';
+    const styles = textStyles(textStyle, value => { textStyle = value; });
     const submit = () => {
       const text = input.value.trim();
       if (!text) {
@@ -1016,7 +1222,8 @@
         input.focus();
         return;
       }
-      addTextOverlay(text);
+      if (!state.data?.duration) { toast('请先添加视频'); return; }
+      addTextOverlay(text, textStyle);
       input.value = '';
       toast('文字已添加到画面');
     };
@@ -1040,11 +1247,11 @@
       presets.appendChild(chip);
     }
 
-    const nodes = [form, presets];
+    const nodes = [form, styles, presets];
     if (state.texts.length) {
       nodes.push(note(`画面中已有 ${state.texts.length} 段文字，点击文字右上角的 × 可以删除。`));
     } else {
-      nodes.push(note('文字会显示在画面中央，可多次添加。'));
+      nodes.push(note('添加后可在预览画面中拖动文字。'));
     }
     return nodes;
   }
@@ -1056,15 +1263,16 @@
       button.type = 'button';
       button.setAttribute('aria-label', `添加贴纸 ${emoji}`);
       button.addEventListener('click', () => {
+        if (!state.data?.duration) { toast('请先添加视频'); return; }
         addSticker(emoji);
         if (!state.stickerHintShown) {
           state.stickerHintShown = true;
-          toast('点击画面上的贴纸可以移除');
+          toast('拖动贴纸可移动，点 × 可删除');
         }
       });
       grid.appendChild(button);
     }
-    return [grid, note('贴纸会添加在画面中，点击贴纸即可移除。')];
+    return [grid, note('贴纸可在预览中拖动，点右上角的 × 可删除。')];
   }
 
   function buildPipSheet() {
@@ -1073,8 +1281,9 @@
       nodes.push(miniRow({
         icon: 'i-pip',
         name: '画中画 1',
-        sub: '跟随主视频播放，可随时移除',
+        sub: '拖动画面可改变位置，拖动轨道手柄可调整时间',
       }));
+      nodes.push(pipSizeControl(state.pip));
       nodes.push(optionGrid([
         optionButton({ label: '更换画面', icon: 'i-image', onClick: () => el.filePip.click() }),
         optionButton({ label: '移除画中画', icon: 'i-trash', onClick: removePipFromUI }),
@@ -1083,7 +1292,7 @@
       nodes.push(optionGrid([
         optionButton({ label: '选择视频', icon: 'i-image', onClick: () => el.filePip.click() }),
       ], 'cols-1'));
-      nodes.push(note('选择一段视频作为画中画，会叠加在画面右下角并跟随播放。'));
+      nodes.push(note('画中画从白线处开始，可在预览中拖动位置。'));
     }
     return nodes;
   }
@@ -1116,7 +1325,7 @@
       });
       grid.appendChild(button);
     }
-    return [grid, note('特效只应用在预览画面上，不会修改原始素材。')];
+    return [grid, note('特效默认从白线开始，拖动特效轨道可调整位置和时长。')];
   }
 
   function buildMaterialSheet() {
@@ -1185,22 +1394,175 @@
   /* 文字 / 贴纸 / 特效 / 画中画 / 音频                                 */
   /* ------------------------------------------------------------------ */
 
-  function addTextOverlay(text) {
+  function enableOverlayDrag(node, layer) {
+    let drag = null;
+    function moveTo(left, top) {
+      const { width, height } = layer.getBoundingClientRect();
+      if (!width || !height) return;
+      const clamp = (value, min, max) => Math.max(min, Math.min(max, value));
+      const x = Math.min(50, node.offsetWidth / width * 50);
+      const y = Math.min(50, node.offsetHeight / height * 50);
+      node.style.left = clamp(left, x, Math.max(x, 100 - x - 16 / width * 100)) + '%';
+      node.style.top = clamp(top, Math.min(50, y + 12 / height * 100), 100 - y) + '%';
+    }
+
+    node.tabIndex = 0;
+    node.addEventListener('keydown', event => {
+      if (event.target !== node) return;
+      const steps = { ArrowLeft: [-2, 0], ArrowRight: [2, 0], ArrowUp: [0, -2], ArrowDown: [0, 2] };
+      const step = steps[event.key];
+      if (!step) return;
+      event.preventDefault();
+      event.stopPropagation();
+      moveTo(parseFloat(node.style.left) + step[0], parseFloat(node.style.top) + step[1]);
+    });
+
+    node.addEventListener('pointerdown', event => {
+      if (!event.isPrimary || event.button !== 0 || event.target.closest('.ov-remove, .ov-scale, .pip-remove')) return;
+      drag = {
+        id: event.pointerId,
+        x: event.clientX,
+        y: event.clientY,
+        left: parseFloat(node.style.left),
+        top: parseFloat(node.style.top)
+      };
+      node.setPointerCapture(event.pointerId);
+    });
+    node.addEventListener('pointermove', event => {
+      if (!drag || drag.id !== event.pointerId) return;
+      const dx = event.clientX - drag.x;
+      const dy = event.clientY - drag.y;
+      if (!drag.started && Math.hypot(dx, dy) < 5) return;
+      drag.started = true;
+      const { width, height } = layer.getBoundingClientRect();
+      if (width && height) moveTo(drag.left + dx / width * 100, drag.top + dy / height * 100);
+    });
+    node.addEventListener('lostpointercapture', () => { drag = null; });
+  }
+
+  function splitTextAtPlayhead(item) {
+    const at = state.data.currentTime;
+    if (at - item.start < 0.1 || Math.min(item.end, state.data.duration) - at < 0.1) return;
+    const end = item.end;
+    item.end = at;
+    addTextOverlay(item.text, item.node.dataset.textStyle, { start: at, end, source: item });
+    closeSheet();
+    toast('已在白线处分割文字');
+  }
+
+  function addTextOverlay(text, textStyle, split) {
     const node = make('div', 'text-overlay');
-    node.appendChild(document.createTextNode(text));
+    node.setAttribute('aria-label', '移动文字：' + text);
+    node.dataset.textStyle = textStyle;
+    node.style.left = '50%';
+    node.style.top = Math.min(82, 48 + state.texts.length * 9) + '%';
+    if (split) {
+      node.style.cssText = split.source.node.style.cssText;
+      node.classList.toggle('is-resized', split.source.node.classList.contains('is-resized'));
+    }
+    enableOverlayDrag(node, el.textStack);
+    const glyph = make('span', 'overlay-text-content', text);
+    node.appendChild(glyph);
     const remove = make('button', 'ov-remove', '×');
     remove.type = 'button';
     remove.setAttribute('aria-label', '删除这段文字');
     remove.addEventListener('click', event => {
       event.stopPropagation();
       node.remove();
+      removeTimedTrack(state.texts.find(item => item.node === node));
       state.texts = state.texts.filter(item => item.node !== node);
+      renderTimedTracks(state.data);
       toast('已删除文字');
       updateTextSheetNote();
     });
     node.appendChild(remove);
     el.textStack.appendChild(node);
-    state.texts.push({ node, text });
+    const range = split ? { start: split.start, end: split.end } : overlayRange();
+    const item = { node, text, ...range, rotation: split?.source.rotation || 0 };
+    state.texts.push(item);
+    addTimedTrack(item, 'text', text);
+    if (!split) node.classList.remove('is-overlay-selected');
+    node.addEventListener('pointerdown', event => {
+      if (event.target.closest('.ov-remove, .ov-scale, .pip-remove')) return;
+      state.selectedTimed = item;
+      renderTimedTracks(state.data);
+    });
+    node.addEventListener('focus', () => {
+      state.selectedTimed = item;
+      renderTimedTracks(state.data);
+    });
+    for (const [dx, dy, label] of [
+      [-1, -1, '左上角'], [0, -1, '上边'], [1, -1, '右上角'],
+      [-1, 0, '左边'], [1, 0, '右边'],
+      [-1, 1, '左下角'], [0, 1, '下边'], [1, 1, '右下角']
+    ]) {
+      const handle = make('button', 'ov-scale');
+      handle.type = 'button';
+      handle.setAttribute('aria-label', label + '缩放文字');
+      handle.style.left = (dx + 1) * 50 + '%';
+      handle.style.top = (dy + 1) * 50 + '%';
+      handle.style.cursor = !dx ? 'ns-resize' : !dy ? 'ew-resize' :
+        dx === dy ? 'nwse-resize' : 'nesw-resize';
+      node.appendChild(handle);
+
+      let drag;
+      function resize(width, height, fontSize, x, y) {
+        const maxWidth = el.textStack.clientWidth;
+        const maxHeight = el.textStack.clientHeight;
+        if (!width || !height || !maxWidth || !maxHeight) return;
+        node.classList.add('is-resized');
+        let newWidth = width;
+        let newHeight = height;
+        if (dx && dy) {
+          const factor = 1 + (dx * x * width + dy * y * height) / (width ** 2 + height ** 2);
+          const max = Math.min(maxWidth / width, maxHeight / height);
+          const min = Math.min(max, Math.max(18 / width, 14 / height));
+          const scale = clamp(factor, min, max);
+          newWidth *= scale;
+          newHeight *= scale;
+          node.style.fontSize = fontSize * scale + 'px';
+        } else if (dx) {
+          newWidth = clamp(width + dx * x, Math.min(maxWidth, Math.max(18, fontSize * 1.05)), maxWidth);
+        } else {
+          newHeight = clamp(height + dy * y, 14, maxHeight);
+        }
+        node.style.width = newWidth + 'px';
+        node.style.height = newHeight + 'px';
+        if (dx && !dy) {
+          node.style.height = Math.min(maxHeight, Math.max(height, glyph.scrollHeight)) + 'px';
+        }
+      }
+
+      handle.addEventListener('pointerdown', event => {
+        if (!event.isPrimary || event.button !== 0) return;
+        event.stopPropagation();
+        drag = { id: event.pointerId, x: event.clientX, y: event.clientY,
+          width: node.offsetWidth, height: node.offsetHeight,
+          fontSize: parseFloat(getComputedStyle(node).fontSize) };
+        handle.setPointerCapture(event.pointerId);
+      });
+      function followPointer(event) {
+        if (drag?.id !== event.pointerId) return;
+        const deltaX = (event.clientX - drag.x) * 2;
+        const deltaY = (event.clientY - drag.y) * 2;
+        const angle = item.rotation || 0;
+        const x = deltaX * Math.cos(angle) + deltaY * Math.sin(angle);
+        const y = -deltaX * Math.sin(angle) + deltaY * Math.cos(angle);
+        if (x || y) resize(drag.width, drag.height, drag.fontSize, x, y);
+      }
+      handle.addEventListener('pointermove', followPointer);
+      handle.addEventListener('pointerup', followPointer);
+      handle.addEventListener('lostpointercapture', () => { drag = null; });
+      handle.addEventListener('keydown', event => {
+        const increase = event.key === 'ArrowRight' || event.key === 'ArrowUp';
+        if (!increase && !['ArrowLeft', 'ArrowDown'].includes(event.key)) return;
+        event.preventDefault();
+        event.stopPropagation();
+        const step = increase ? 4 : -4;
+        const { offsetWidth: width, offsetHeight: height } = node;
+        resize(width, height, parseFloat(getComputedStyle(node).fontSize), dx * step, dy * step);
+      });
+    }
     updateTextSheetNote();
   }
 
@@ -1210,40 +1572,62 @@
     if (!noteEl) return;
     noteEl.textContent = state.texts.length
       ? `画面中已有 ${state.texts.length} 段文字，点击文字右上角的 × 可以删除。`
-      : '文字会显示在画面中央，可多次添加。';
+      : '添加后可在预览画面中拖动文字。';
   }
 
   function addSticker(emoji) {
-    const node = make('button', 'sticker', emoji);
-    node.type = 'button';
-    node.title = '点击移除贴纸';
+    const node = make('div', 'sticker', emoji);
+    node.setAttribute('aria-label', '移动贴纸：' + emoji);
     const spot = STICKER_SPOTS[state.stickers.length % STICKER_SPOTS.length];
     node.style.left = `${spot[0]}%`;
     node.style.top = `${spot[1]}%`;
-    node.addEventListener('click', event => {
+    const remove = make('button', 'ov-remove', '×');
+    remove.type = 'button';
+    remove.setAttribute('aria-label', '删除贴纸');
+    remove.addEventListener('click', event => {
       event.stopPropagation();
       node.remove();
+      removeTimedTrack(state.stickers.find(item => item.node === node));
       state.stickers = state.stickers.filter(item => item.node !== node);
+      renderTimedTracks(state.data);
       toast('已移除贴纸');
     });
+    node.appendChild(remove);
+    enableOverlayDrag(node, el.stickerLayer);
     el.stickerLayer.appendChild(node);
-    state.stickers.push({ node, emoji });
+    const item = { node, emoji, ...overlayRange() };
+    state.stickers.push(item);
+    addTimedTrack(item, 'sticker', emoji);
   }
 
   function applyEffect(id) {
     const effect = EFFECTS.find(item => item.id === id) || EFFECTS[0];
+    if (effect.id !== 'original' && !state.data?.duration) { toast('请先添加视频'); return; }
+    removeTimedTrack(state.effectItem);
+    state.effectItem = null;
     state.effect = effect.id;
-    el.preview.style.filter = effect.filter;
+    el.preview.style.filter = '';
+    if (effect.id !== 'original') {
+      const item = { name: effect.name, filter: effect.filter, ...overlayRange() };
+      state.effectItem = item;
+      addTimedTrack(item, 'effect', effect.name);
+    } else {
+      renderTimedTracks(state.data);
+    }
   }
-
   function addPip(file) {
+    if (!state.data?.duration) { toast('请先添加视频'); return; }
     removePip(false);
     const url = URL.createObjectURL(file);
     const wrap = make('div', 'pip-wrap');
+    wrap.style.left = '79%';
+    wrap.style.top = '76%';
+    wrap.style.width = '34%';
+    enableOverlayDrag(wrap, el.pipSlot);
     const video = make('video');
     video.src = url;
     video.muted = true;
-    video.loop = true;
+
     video.playsInline = true;
     video.preload = 'auto';
     video.setAttribute('playsinline', '');
@@ -1257,19 +1641,24 @@
     });
     wrap.appendChild(remove);
     el.pipSlot.appendChild(wrap);
-    state.pip = { wrap, el: video, url };
-    const alignPip = () => {
-      if (!state.pip || state.pip.el !== video || !state.data) return;
-      const duration = video.duration;
-      if (Number.isFinite(duration) && duration > 0) {
-        video.currentTime = state.data.currentTime % duration;
-      }
-      if (state.data.playing) video.play().catch(() => {});
-    };
-    if (video.readyState >= 1) alignPip();
-    else video.addEventListener('loadedmetadata', alignPip, { once: true });
-    toast('已添加画中画');
-    refreshSheet();
+    const start = overlayRange().start;
+    const item = { wrap, node: wrap, el: video, url, name: file.name, anchor: start, start };
+    state.pip = item;
+    video.addEventListener('loadedmetadata', () => {
+      if (state.pip !== item || !Number.isFinite(video.duration) || video.duration <= 0) return;
+      item.limit = start + video.duration;
+      item.end = Math.min(item.limit, state.data.duration);
+      addTimedTrack(item, 'pip', item.name);
+      syncBackgroundMedia(state.data);
+      refreshSheet();
+      toast('已添加画中画');
+    }, { once: true });
+    video.addEventListener('error', () => {
+      if (state.pip !== item) return;
+      removePip(false);
+      toast('无法读取画中画视频');
+    }, { once: true });
+    wrap.hidden = true;
   }
 
   function removePip(showToast = true) {
@@ -1277,7 +1666,9 @@
     state.pip.el.pause();
     state.pip.wrap.remove();
     URL.revokeObjectURL(state.pip.url);
+    removeTimedTrack(state.pip);
     state.pip = null;
+    renderTimedTracks(state.data);
     if (showToast) toast('已移除画中画');
     refreshSheet();
   }
@@ -1286,30 +1677,47 @@
     removePip();
   }
 
-  function addAudio(file) {
+  function addAudio(file, source) {
+    if (!state.data?.duration) { toast('请先添加视频'); return; }
     removeAudio(false);
-    const url = URL.createObjectURL(file);
-    const audio = new Audio(url);
+    const url = file ? URL.createObjectURL(file) : null;
+    const audio = new Audio(url || source.clip.src);
     audio.preload = 'auto';
     audio.volume = 0.9;
-    state.audio = { name: file.name, url, el: audio, duration: 0 };
+    const start = overlayRange().start;
+    const audioStart = source?.projectStart ?? start;
+    const offset = source?.clip.start || 0;
+    const name = source ? '视频原声 · 片段 ' + (source.index + 1) : file.name;
+    const item = { name, url, el: audio, anchor: audioStart - offset,
+      start: audioStart, minStart: audioStart, duration: 0, volume: 0.9, fade: 0 };
+    state.audio = item;
     audio.addEventListener('loadedmetadata', () => {
-      if (!state.audio) return;
-      state.audio.duration = Number.isFinite(audio.duration) ? audio.duration : 0;
-      if (state.data) renderAudio(state.data);
-    });
-    el.audioClipName.textContent = file.name;
-    toast(`已添加音频「${file.name}」`, 2400);
-    if (state.data) renderAudio(state.data);
+      if (state.audio !== item || !Number.isFinite(audio.duration) || audio.duration <= 0) return;
+      item.duration = audio.duration;
+      item.limit = item.anchor + Math.min(audio.duration, source?.clip.end ?? audio.duration);
+      item.end = Math.min(item.limit, state.data.duration);
+      addTimedTrack(item, 'audio', item.name);
+      toast('已添加音频');
+      syncBackgroundMedia(state.data);
+    }, { once: true });
+    audio.addEventListener('error', () => {
+      if (state.audio !== item) return;
+      removeAudio(false);
+      refreshSheet();
+      toast('无法读取这个音频文件');
+    }, { once: true });
+    toast('正在读取音频…');
+    if (state.data) renderTimedTracks(state.data);
     refreshSheet();
   }
 
   function removeAudio(showToast = true) {
     if (!state.audio) return;
     state.audio.el.pause();
-    URL.revokeObjectURL(state.audio.url);
+    if (state.audio.url) URL.revokeObjectURL(state.audio.url);
+    removeTimedTrack(state.audio);
     state.audio = null;
-    if (state.data) renderAudio(state.data);
+    if (state.data) renderTimedTracks(state.data);
     if (showToast) toast('已移除音频');
   }
 
@@ -1355,33 +1763,97 @@
   }
 
   function beginPan(event) {
-    if (!state.data) return;
-    if (event.pointerType === 'mouse' && event.button !== 0) return;
-    const interactive = event.target.closest('button:not(.clip)');
-    if (interactive) return;
-    state.pan = {
+    if (!state.data || state.pan || !event.isPrimary || event.button !== 0) return;
+    if (event.target.closest('button:not(.clip):not(.timed-label)')) return;
+    const clip = event.target.closest('.clip');
+    const track = event.target.closest('.timed-clip');
+    const item = track && [state.audio, state.pip, state.effectItem, ...state.texts, ...state.stickers]
+      .find(entry => entry?.track === track);
+    const pan = {
       pointerId: event.pointerId,
       startX: event.clientX,
+      startY: event.clientY,
       startTime: state.data.currentTime,
-      moved: false,
-      clip: event.target.closest('.clip'),
-      lastSeek: 0,
+      item, clip,
+      lastSeek: 0
     };
+    state.pan = pan;
     el.timeline.classList.add('is-panning');
-    try {
-      el.timeline.setPointerCapture(event.pointerId);
-    } catch {
-      /* 某些浏览器不支持对 div 捕获，忽略即可 */
-    }
+    el.timeline.setPointerCapture(event.pointerId);
     if (state.data.playing) editor.togglePlayback();
+    if (clip || item) {
+      pan.timer = setTimeout(() => {
+        pan.dragging = true;
+        pan.node = clip || track;
+        pan.node.classList.add('is-lifted');
+        if (item) {
+          state.selectedTimed = item;
+          pan.itemStart = item.start;
+          pan.itemEnd = item.end;
+          pan.anchor = item.anchor;
+          pan.limit = item.limit;
+          pan.minStart = item.minStart;
+          renderTimedTracks(state.data);
+        } else {
+          pan.clipId = Number(clip.dataset.clipId);
+          state.selectedTimed = null;
+          renderTimedTracks(state.data);
+        }
+        navigator.vibrate?.(25);
+      }, 420);
+    }
     event.preventDefault();
+  }
+
+  function dragTimelineItem(pan, delta) {
+    if (pan.item) {
+      const item = pan.item;
+      const length = pan.itemEnd - pan.itemStart;
+      const start = clamp(pan.itemStart + delta / state.pps, 0, Math.max(0, state.data.duration - length));
+      const offset = start - pan.itemStart;
+      item.start = start;
+      item.end = start + length;
+      if (pan.anchor !== undefined) {
+        item.anchor = pan.anchor + offset;
+        item.limit = pan.limit + offset;
+        if (pan.minStart !== undefined) item.minStart = pan.minStart + offset;
+      }
+      renderTimedTracks(state.data);
+      syncBackgroundMedia(state.data);
+      return;
+    }
+
+    pan.node.style.translate = delta + 'px';
+    const center = pan.node.getBoundingClientRect();
+    const time = timeAtScreenX(center.left + center.width / 2);
+    const original = state.data.clips.findIndex(clip => clip.id === pan.clipId);
+    let destination = original;
+    let start = 0;
+    for (const [index, clip] of state.data.clips.entries()) {
+      const length = clip.end - clip.start;
+      const midpoint = start + length / 2;
+      if (index < original && time < midpoint) destination = Math.min(destination, index);
+      if (index > original && time >= midpoint) destination = index;
+      start += length;
+    }
+    pan.destination = destination;
+    pan.target?.classList.remove('is-drop-target');
+    pan.target = el.clips.children[destination];
+    if (pan.target !== pan.node) pan.target?.classList.add('is-drop-target');
   }
 
   function movePan(event) {
     const pan = state.pan;
     if (!pan || event.pointerId !== pan.pointerId) return;
     const delta = event.clientX - pan.startX;
-    if (!pan.moved && Math.abs(delta) > 3) pan.moved = true;
+    if (pan.dragging) {
+      dragTimelineItem(pan, delta);
+      return;
+    }
+    if (!pan.moved && Math.hypot(delta, event.clientY - pan.startY) > 7) {
+      clearTimeout(pan.timer);
+      pan.moved = true;
+    }
     if (!pan.moved) return;
     const now = performance.now();
     if (now - pan.lastSeek < 30) return;
@@ -1394,21 +1866,41 @@
     const pan = state.pan;
     if (!pan || event.pointerId !== pan.pointerId) return;
     state.pan = null;
+    clearTimeout(pan.timer);
     el.timeline.classList.remove('is-panning');
-    if (!state.data) return;
-    if (event.type === 'pointercancel') return;
+    const committed = event.type === 'pointerup';
+    if (pan.dragging) {
+      if (committed && (pan.item || pan.destination !== undefined)) {
+        dragTimelineItem(pan, event.clientX - pan.startX);
+      } else if (pan.item) {
+        Object.assign(pan.item, { start: pan.itemStart, end: pan.itemEnd, anchor: pan.anchor, limit: pan.limit, minStart: pan.minStart });
+        renderTimedTracks(state.data);
+        syncBackgroundMedia(state.data);
+      }
+      pan.node.classList.remove('is-lifted');
+      pan.node.style.translate = '';
+      pan.target?.classList.remove('is-drop-target');
+      if (committed && pan.clipId !== undefined) {
+        if (pan.destination !== undefined) editor.moveClip(pan.clipId, pan.destination);
+        editor.selectClip(pan.clipId);
+      }
+      return;
+    }
+    if (!committed || !state.data) return;
     if (!pan.moved) {
-      if (pan.clip && pan.clip.dataset.clipId) {
+      if (pan.item) {
+        state.selectedTimed = pan.item;
+        renderTimedTracks(state.data);
+      } else if (pan.clip?.dataset.clipId) {
+        state.selectedTimed = null;
         editor.selectClip(Number(pan.clip.dataset.clipId));
       } else {
         editor.seek(timeAtScreenX(event.clientX));
       }
       return;
     }
-    const delta = event.clientX - pan.startX;
-    editor.seek(clamp(pan.startTime - delta / state.pps, 0, state.data.duration));
+    editor.seek(clamp(pan.startTime - (event.clientX - pan.startX) / state.pps, 0, state.data.duration));
   }
-
   function onWheel(event) {
     if (!state.data) return;
     const amount = Math.abs(event.deltaX) > Math.abs(event.deltaY) ? event.deltaX : event.deltaY;
@@ -1424,9 +1916,176 @@
   /* 启动                                                               */
   /* ------------------------------------------------------------------ */
 
+  function bindTextRotation() {
+    const canvas = make('canvas', 'rotation-cursor');
+    canvas.setAttribute('aria-hidden', 'true');
+    canvas.hidden = true;
+    el.frame.appendChild(canvas);
+    const ctx = canvas.getContext('2d');
+    let drag = null;
+    let consumeClick = false;
+
+    function geometry(node, event) {
+      const box = node.getBoundingClientRect();
+      const x = box.left + box.width / 2;
+      const y = box.top + box.height / 2;
+      const px = event.clientX - x;
+      const py = event.clientY - y;
+      return { x, y, radius: Math.hypot(px, py), angle: Math.atan2(py, px) };
+    }
+
+    function targetAt(event) {
+      const item = state.selectedTimed;
+      const node = item?.kind === 'text' && item.node;
+      if (!node || node.hidden || event.target.closest('.text-overlay, .sticker, .pip-wrap')) return null;
+      return item;
+    }
+
+    function hide() {
+      canvas.hidden = true;
+      el.frame.classList.remove('is-rotating-text');
+    }
+
+    function draw(item, event) {
+      const { x, y, radius, angle } = geometry(item.node, event);
+      const frame = el.frame.getBoundingClientRect();
+      if (!ctx || !radius || !frame.width || !frame.height) return;
+      const ratio = window.devicePixelRatio || 1;
+      const width = Math.round(frame.width * ratio);
+      const height = Math.round(frame.height * ratio);
+      if (canvas.width !== width) canvas.width = width;
+      if (canvas.height !== height) canvas.height = height;
+      canvas.hidden = false;
+      el.frame.classList.add('is-rotating-text');
+      ctx.setTransform(ratio, 0, 0, ratio, 0, 0);
+      ctx.clearRect(0, 0, frame.width, frame.height);
+      const cx = x - frame.left;
+      const cy = y - frame.top;
+      const half = Math.min(0.55, 13 / radius);
+      ctx.beginPath();
+      ctx.arc(cx, cy, radius, angle - half, angle + half);
+      for (const end of [-1, 1]) {
+        const a = angle + end * half;
+        const px = cx + Math.cos(a) * radius;
+        const py = cy + Math.sin(a) * radius;
+        const tangent = a + end * Math.PI / 2;
+        ctx.moveTo(px - 6 * Math.cos(tangent - 0.6), py - 6 * Math.sin(tangent - 0.6));
+        ctx.lineTo(px, py);
+        ctx.lineTo(px - 6 * Math.cos(tangent + 0.6), py - 6 * Math.sin(tangent + 0.6));
+      }
+      ctx.lineCap = 'round';
+      ctx.lineJoin = 'round';
+      ctx.strokeStyle = '#231a30';
+      ctx.lineWidth = 4;
+      ctx.stroke();
+      ctx.strokeStyle = '#fff';
+      ctx.lineWidth = 2;
+      ctx.stroke();
+    }
+
+    el.frame.addEventListener('pointermove', event => {
+      if (drag?.id === event.pointerId) {
+        const { angle } = geometry(drag.item.node, event);
+        const delta = angle - drag.previousAngle;
+        drag.previousAngle = angle;
+        drag.item.rotation = (drag.item.rotation || 0) + Math.atan2(Math.sin(delta), Math.cos(delta));
+        drag.item.node.style.setProperty('--text-rotation', drag.item.rotation + 'rad');
+        draw(drag.item, event);
+      } else {
+        const item = targetAt(event);
+        if (item) draw(item, event);
+        else hide();
+      }
+    });
+    el.frame.addEventListener('pointerdown', event => {
+      consumeClick = false;
+      const item = targetAt(event);
+      if (!item || !event.isPrimary || event.button !== 0) return;
+      event.preventDefault();
+      consumeClick = true;
+      drag = { item, id: event.pointerId, previousAngle: geometry(item.node, event).angle };
+      if (state.data.playing) editor.togglePlayback();
+      el.frame.setPointerCapture(event.pointerId);
+      draw(item, event);
+    });
+    el.frame.addEventListener('lostpointercapture', () => { drag = null; hide(); });
+    el.frame.addEventListener('pointerleave', () => { if (!drag) hide(); });
+    el.frame.addEventListener('click', event => {
+      if (!consumeClick) return;
+      consumeClick = false;
+      event.stopImmediatePropagation();
+    }, true);
+  }
+
+  function bindToolbarScroll() {
+    const toolbar = el.toolbar;
+    let gesture = null;
+    let suppressClick = false;
+
+    toolbar.addEventListener('pointerdown', event => {
+      if (!event.isPrimary || event.button !== 0) return;
+      suppressClick = false;
+      if (toolbar.scrollWidth <= toolbar.clientWidth) return;
+      const press = {
+        id: event.pointerId,
+        x: event.clientX,
+        left: toolbar.scrollLeft,
+        active: false
+      };
+      gesture = press;
+      press.timer = setTimeout(() => activate(press), 420);
+    });
+
+    function activate(press) {
+      clearTimeout(press.timer);
+      press.active = true;
+      suppressClick = true;
+      toolbar.classList.add('is-dragging');
+      toolbar.setPointerCapture(press.id);
+    }
+
+    toolbar.addEventListener('pointermove', event => {
+      if (gesture?.id !== event.pointerId) return;
+      const delta = event.clientX - gesture.x;
+      if (!gesture.active && Math.abs(delta) >= 7) activate(gesture);
+      if (gesture.active) toolbar.scrollLeft = gesture.left - delta;
+    });
+
+    function finish(event) {
+      if (gesture?.id !== event.pointerId) return;
+      if (event.type === 'lostpointercapture' && event.target !== toolbar) return;
+      clearTimeout(gesture.timer);
+      gesture = null;
+      toolbar.classList.remove('is-dragging');
+    }
+
+    for (const type of ['pointerup', 'pointercancel', 'lostpointercapture']) {
+      toolbar.addEventListener(type, finish);
+    }
+    toolbar.addEventListener('pointerleave', event => {
+      if (!gesture?.active) finish(event);
+    });
+    toolbar.addEventListener('contextmenu', event => event.preventDefault());
+    toolbar.addEventListener('click', event => {
+      if (suppressClick && event.detail > 0) {
+        suppressClick = false;
+        return;
+      }
+      const button = event.target.closest('.tool');
+      if (button) openSheet(button.dataset.tool);
+    });
+  }
+
   function bindEvents() {
+    bindTextRotation();
+    el.projectPosition.addEventListener('input', () => {
+      if (!state.data?.duration) return;
+      const target = el.projectPosition.valueAsNumber;
+      if (state.data.playing) editor.togglePlayback();
+      editor.seek(target);
+    });
+    el.projectPosition.addEventListener('keydown', event => event.stopPropagation());
     el.play.addEventListener('click', togglePlayback);
-    el.split.addEventListener('click', doSplit);
     el.undo.addEventListener('click', doUndo);
     el.redo.addEventListener('click', doRedo);
     el.fullscreen.addEventListener('click', toggleFullscreen);
@@ -1454,12 +2113,8 @@
 
     el.addMedia.addEventListener('click', () => el.fileVideo.click());
     el.audioAdd.addEventListener('click', () => openSheet('audio'));
-    el.audioClip.addEventListener('click', () => openSheet('audio'));
     el.cover.addEventListener('click', openCoverModal);
-    el.toolbar.addEventListener('click', event => {
-      const button = event.target.closest('.tool');
-      if (button) openSheet(button.dataset.tool);
-    });
+    bindToolbarScroll();
     el.sheetDone.addEventListener('click', closeSheet);
     el.sheetScrim.addEventListener('click', closeSheet);
     el.modalScrim.addEventListener('click', () => {
@@ -1472,6 +2127,12 @@
       togglePlayback();
     });
 
+    el.clips.addEventListener('click', event => {
+      const clip = event.target.closest('.clip');
+      if (!clip || event.detail) return;
+      state.selectedTimed = null;
+      editor.selectClip(Number(clip.dataset.clipId));
+    });
     el.timeline.addEventListener('pointerdown', beginPan);
     el.timeline.addEventListener('pointermove', movePan);
     for (const type of ['pointerup', 'pointercancel', 'lostpointercapture']) {
@@ -1537,7 +2198,7 @@
         measure();
         state.layoutDirty = true;
         if (state.data) onState(state.data);
-        renderAudio(state.data || { clips: [], currentTime: 0 });
+        renderTimedTracks(state.data || { clips: [], currentTime: 0 });
         renderEmptyState(state.data);
       }, 120);
     });
@@ -1546,7 +2207,7 @@
       state.videoReady = true;
       renderEmptyState(state.data);
       renderCover(state.data || { clips: [] }, true);
-      renderAudio(state.data || { clips: [], currentTime: 0 });
+      renderTimedTracks(state.data || { clips: [], currentTime: 0 });
     });
     el.preview.addEventListener('loadeddata', () => {
       state.videoReady = true;
