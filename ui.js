@@ -2017,6 +2017,65 @@
     }, true);
   }
 
+  function bindToolbarScroll() {
+    const toolbar = el.toolbar;
+    let gesture = null;
+    let suppressClick = false;
+
+    toolbar.addEventListener('pointerdown', event => {
+      if (!event.isPrimary || event.button !== 0) return;
+      suppressClick = false;
+      if (toolbar.scrollWidth <= toolbar.clientWidth) return;
+      const press = {
+        id: event.pointerId,
+        x: event.clientX,
+        left: toolbar.scrollLeft,
+        active: false
+      };
+      gesture = press;
+      press.timer = setTimeout(() => activate(press), 420);
+    });
+
+    function activate(press) {
+      clearTimeout(press.timer);
+      press.active = true;
+      suppressClick = true;
+      toolbar.classList.add('is-dragging');
+      toolbar.setPointerCapture(press.id);
+    }
+
+    toolbar.addEventListener('pointermove', event => {
+      if (gesture?.id !== event.pointerId) return;
+      const delta = event.clientX - gesture.x;
+      if (!gesture.active && Math.abs(delta) >= 7) activate(gesture);
+      if (gesture.active) toolbar.scrollLeft = gesture.left - delta;
+    });
+
+    function finish(event) {
+      if (gesture?.id !== event.pointerId) return;
+      if (event.type === 'lostpointercapture' && event.target !== toolbar) return;
+      clearTimeout(gesture.timer);
+      gesture = null;
+      toolbar.classList.remove('is-dragging');
+    }
+
+    for (const type of ['pointerup', 'pointercancel', 'lostpointercapture']) {
+      toolbar.addEventListener(type, finish);
+    }
+    toolbar.addEventListener('pointerleave', event => {
+      if (!gesture?.active) finish(event);
+    });
+    toolbar.addEventListener('contextmenu', event => event.preventDefault());
+    toolbar.addEventListener('click', event => {
+      if (suppressClick && event.detail > 0) {
+        suppressClick = false;
+        return;
+      }
+      const button = event.target.closest('.tool');
+      if (button) openSheet(button.dataset.tool);
+    });
+  }
+
   function bindEvents() {
     bindTextRotation();
     el.projectPosition.addEventListener('input', () => {
@@ -2055,10 +2114,7 @@
     el.addMedia.addEventListener('click', () => el.fileVideo.click());
     el.audioAdd.addEventListener('click', () => openSheet('audio'));
     el.cover.addEventListener('click', openCoverModal);
-    el.toolbar.addEventListener('click', event => {
-      const button = event.target.closest('.tool');
-      if (button) openSheet(button.dataset.tool);
-    });
+    bindToolbarScroll();
     el.sheetDone.addEventListener('click', closeSheet);
     el.sheetScrim.addEventListener('click', closeSheet);
     el.modalScrim.addEventListener('click', () => {

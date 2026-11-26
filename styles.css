@@ -908,6 +908,9 @@ button:active {
   -ms-overflow-style: none;
 }
 
+.toolbar { touch-action: pan-y; user-select: none; -webkit-touch-callout: none; }
+.toolbar.is-dragging, .toolbar.is-dragging .tool { cursor: grabbing; }
+
 .toolbar::-webkit-scrollbar {
   display: none;
 }
